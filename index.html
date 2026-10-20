@@ -51,6 +51,10 @@ td { padding: 7px 8px; border-bottom: 1px solid rgba(43,49,57,.6); white-space: 
 .warn { border: 1px solid rgba(247,166,0,.4); background: rgba(247,166,0,.08); color: var(--gold); border-radius: 10px; padding: 10px 12px; font-size: 13px; }
 .err { border-color: rgba(246,70,93,.5); background: rgba(246,70,93,.08); color: var(--down); }
 .hidden { display: none !important; }
+.tabs { display: flex; gap: 6px; padding-top: 12px; padding-bottom: 0; }
+.tabs button { min-height: 42px; }
+.tabs button.act { background: var(--gold); border-color: var(--gold); color: #111; }
+.bar-mini { display: inline-block; height: 6px; border-radius: 3px; background: var(--up); vertical-align: middle; }
 details summary { cursor: pointer; color: var(--mute); font-size: 12px; }
 .tag { padding: 1px 7px; border-radius: 6px; font-size: 11px; border: 1px solid var(--line); }
 .tag.armed { color: var(--gold); border-color: rgba(247,166,0,.4); }
@@ -75,7 +79,11 @@ details summary { cursor: pointer; color: var(--mute); font-size: 12px; }
   </div>
 </header>
 
-<main class="wrap">
+<nav class="wrap tabs">
+  <button data-tab="bot" class="act">🤖 Бот</button>
+  <button data-tab="radar">⚡ Радар на найближчу годину</button>
+</nav>
+<main class="wrap" id="tab-bot">
   <div class="warn" id="note-open">
     Стоп-ордери, стоп-лос і тейк-профіт стоять <b>на біржі</b> і спрацюють навіть із закритою сторінкою.
     Але сканування нових монет, зняття протилежного ордера, беззбиток і трейлінг працюють лише поки ця сторінка відкрита.
@@ -164,6 +172,40 @@ details summary { cursor: pointer; color: var(--mute); font-size: 12px; }
   </section>
 </main>
 
+<main class="wrap hidden" id="tab-radar">
+  <div class="warn">
+    Секретних даних про майбутні пампи не існує. Радар шукає монети, де рух <b>уже починається</b> — за живими публічними даними Bybit:
+    сплеск обсягу на 5-хвилинках, стрибок відкритого інтересу, перекіс стакану, багато шортів, від'ємний funding, свіжі анонси Bybit.
+    Через годину радар сам перевіряє, чи монета справді виросла, — ця статистика покаже, чи працює радар.
+  </div>
+  <section class="card">
+    <div class="bar">
+      <h2>⚡ Монети з ознаками рвучкого руху</h2>
+      <div class="row">
+        <span class="sub" id="radar-info">Ще не сканували</span>
+        <button id="radar-auto">Авто-оновлення: вимк</button>
+        <button id="radar-place">Авто-ставити: вимк</button>
+        <button class="gold" id="radar-run">⚡ Сканувати зараз</button>
+      </div>
+    </div>
+    <div class="grid" id="radar-settings" style="margin:10px 0"></div>
+    <div class="scroll"><table>
+      <thead><tr><th>Монета</th><th>Бал</th><th>Ціна</th><th>15 хв</th><th>Обсяг ×</th><th>OI 15 хв</th><th>Стакан B/A</th><th>Шорти</th><th>Funding</th><th>Анонс</th><th>Чому</th><th></th></tr></thead>
+      <tbody id="radar"><tr><td colspan="12" class="mute">Натисніть «Сканувати зараз»</td></tr></tbody>
+    </table></div>
+  </section>
+  <section class="card">
+    <div class="bar"><h2>Перевірка через годину: чи виріс сигнал</h2><div class="row"><button id="radar-csv">CSV</button><button id="radar-clear">Очистити</button></div></div>
+    <p class="sub" style="margin:0 0 8px">Кожна монета з балом ≥ порогу записується. Через 60 хв радар бере 1-хвилинні свічки цієї години:
+      «макс» — найвищий ріст від ціни сигналу, «через 1 год» — де ціна була в кінці. Влучання = макс ≥ +3%.</p>
+    <div class="kpis" id="radar-kpis"></div>
+    <div class="scroll" style="margin-top:10px"><table>
+      <thead><tr><th>Сигнал</th><th>Монета</th><th>Бал</th><th>Ціна</th><th>Макс за год</th><th>Мін за год</th><th>Через 1 год</th><th>Результат</th><th>Чому</th></tr></thead>
+      <tbody id="radar-log"></tbody>
+    </table></div>
+  </section>
+</main>
+
 <script>
 "use strict";
 // ------------------------------------------------------------------ settings
@@ -245,6 +287,28 @@ function buildSettings() {
     const ok = Number.isFinite(v) && v >= f[3] && v <= f[4] && (!f[5] || Number.isInteger(v));
     el.classList.toggle("bad", !ok);
     if (!ok) { log(`${f[1]}: від ${f[3]} до ${f[4]}${f[5] ? ", ціле" : ""}`, "down"); el.value = CFG[f[0]]; el.classList.remove("bad"); return; }
+    CFG[f[0]] = v; LS.set("settings", CFG);
+  }));
+}
+
+// ------------------------------------------------------------------ radar settings
+const RFIELDS = [
+  ["radarScore", "Поріг балу", 60, 10, 100, false, "з нього сигнал пишеться в перевірку"],
+  ["radarCoins", "Скільки монет", 150, 10, 600, true, "найліквідніші за обігом"],
+  ["radarTurnover", "Мін. обіг 24 год, млн $", 5, 0, 100000, false, ""],
+  ["radarEvery", "Авто-оновлення кожні, хв", 5, 1, 60, true, ""],
+  ["radarTpR", "Тейк для «Поставити», R", 3, 1, 30, false, "стоп — середина останньої години"],
+];
+for (const f of RFIELDS) if (CFG[f[0]] === undefined) CFG[f[0]] = f[2];
+function buildRadarSettings() {
+  $("radar-settings").innerHTML = RFIELDS.map(([k, name, , lo, hi, , hint]) =>
+    `<label>${name}<input data-rk="${k}" inputmode="decimal" value="${esc(CFG[k])}"><small>${esc(hint)}${hint ? " · " : ""}${lo}–${hi}</small></label>`).join("");
+  $("radar-settings").querySelectorAll("[data-rk]").forEach(el => el.addEventListener("change", () => {
+    const f = RFIELDS.find(x => x[0] === el.dataset.rk);
+    const v = parseNum(el.value);
+    if (!(Number.isFinite(v) && v >= f[3] && v <= f[4] && (!f[5] || Number.isInteger(v)))) {
+      log(`${f[1]}: від ${f[3]} до ${f[4]}${f[5] ? ", ціле" : ""}`, "down"); el.value = CFG[f[0]]; return;
+    }
     CFG[f[0]] = v; LS.set("settings", CFG);
   }));
 }
@@ -599,6 +663,241 @@ $("btn-mode").onclick = () => {
   if (RUN) loop();
 };
 
+// ------------------------------------------------------------------ radar
+let RADAR = [], RADARLOG = LS.get("radarLog", []), radarBusy = false, radarAt = 0;
+async function pool(items, n, fn) {
+  let i = 0;
+  await Promise.all(Array.from({ length: n }, async () => { while (i < items.length) { const it = items[i++]; try { await fn(it); } catch (e) { /* skip */ } } }));
+}
+async function k5(symbol) {
+  const r = await bx("/v5/market/kline", { query: { category: "linear", symbol, interval: "5", limit: "64" } });
+  return (r.list || []).slice().reverse().map(k => ({ t: +k[0], o: +k[1], h: +k[2], l: +k[3], c: +k[4], v: +(k[6] ?? k[5] ?? 0) }));
+}
+function median(a) { const b = a.slice().sort((x, y) => x - y); return b.length ? b[Math.floor(b.length / 2)] : 0; }
+async function announcements() {
+  try {
+    const r = await bx("/v5/announcements/index", { query: { locale: "en-US", limit: "40" } });
+    const cutoff = Date.now() - 72 * 3600e3;
+    return (r.list || []).filter(a => Number(a.dateTimestamp || a.publishTime || 0) >= cutoff)
+      .map(a => ({ title: String(a.title || ""), url: a.url || "", type: (a.type && a.type.key) || "", t: Number(a.dateTimestamp || a.publishTime || 0) }));
+  } catch (e) { log("Анонси Bybit недоступні: " + e.message, "mute"); return []; }
+}
+function baseOf(symbol) { return symbol.replace(/USDT$/, "").replace(/^1000+/, "").replace(/^10+(?=[A-Z])/, ""); }
+async function radarDetail(c) {
+  const sym = c.symbol;
+  try {                                                         // open interest, 5-minute steps
+    const r = await bx("/v5/market/open-interest", { query: { category: "linear", symbol: sym, intervalTime: "5min", limit: "7" } });
+    const l = r.list || [];
+    if (l.length >= 4) c.oi15 = (Number(l[0].openInterest) / Number(l[3].openInterest) - 1) * 100;
+  } catch (e) { /* no OI */ }
+  try {                                                         // order book imbalance within 1% of price
+    const ob = await bx("/v5/market/orderbook", { query: { category: "linear", symbol: sym, limit: "200" } });
+    const lo = c.last * 0.99, hi = c.last * 1.01;
+    const bid = (ob.b || []).filter(x => Number(x[0]) >= lo).reduce((a, x) => a + Number(x[0]) * Number(x[1]), 0);
+    const ask = (ob.a || []).filter(x => Number(x[0]) <= hi).reduce((a, x) => a + Number(x[0]) * Number(x[1]), 0);
+    if (ask > 0) c.book = bid / ask;
+  } catch (e) { /* no book */ }
+  try {                                                         // share of accounts long
+    const r = await bx("/v5/market/account-ratio", { query: { category: "linear", symbol: sym, period: "5min", limit: "1" } });
+    const row = (r.list || [])[0];
+    if (row) c.longPct = Number(row.buyRatio) * 100;
+  } catch (e) { /* no ratio */ }
+}
+function radarScore(c) {
+  let sc = 0; const why = [];
+  if (c.volX >= 8) { sc += 30; why.push(`обсяг ×${c.volX.toFixed(1)} за 15 хв`); }
+  else if (c.volX >= 5) { sc += 24; why.push(`обсяг ×${c.volX.toFixed(1)}`); }
+  else if (c.volX >= 3) { sc += 16; why.push(`обсяг ×${c.volX.toFixed(1)}`); }
+  else if (c.volX >= 2) { sc += 8; why.push(`обсяг ×${c.volX.toFixed(1)}`); }
+  if (c.ch15 >= 1 && c.ch15 <= 6) { sc += 10; why.push(`+${c.ch15.toFixed(1)}% за 15 хв`); }
+  else if (c.ch15 > 12) { sc -= 15; why.push(`вже +${c.ch15.toFixed(1)}% — пізно`); }
+  else if (c.ch15 < -2) { sc -= 10; why.push(`падає ${c.ch15.toFixed(1)}%`); }
+  if (c.newHigh) { sc += 10; why.push("новий максимум 5 год"); }
+  if (c.oi15 != null) {
+    if (c.oi15 >= 5) { sc += 20; why.push(`OI +${c.oi15.toFixed(1)}% за 15 хв`); }
+    else if (c.oi15 >= 2.5) { sc += 12; why.push(`OI +${c.oi15.toFixed(1)}%`); }
+    else if (c.oi15 >= 1) { sc += 6; why.push(`OI +${c.oi15.toFixed(1)}%`); }
+  }
+  if (c.book != null) {
+    if (c.book >= 2) { sc += 10; why.push(`покупців у стакані ×${c.book.toFixed(1)}`); }
+    else if (c.book >= 1.4) { sc += 6; why.push(`стакан на боці покупців ×${c.book.toFixed(1)}`); }
+    else if (c.book <= 0.6) { sc -= 8; why.push(`стакан на боці продавців ×${c.book.toFixed(1)}`); }
+  }
+  if (c.longPct != null) {
+    if (c.longPct <= 45) { sc += 8; why.push(`шортів ${(100 - c.longPct).toFixed(0)}% — паливо для сквізу`); }
+    else if (c.longPct >= 70) { sc -= 5; why.push(`лонгів ${c.longPct.toFixed(0)}% — натовп уже в лонгах`); }
+  }
+  if (c.fund < 0) { sc += 5; why.push(`funding ${c.fund.toFixed(3)}%`); }
+  if (c.news) { sc += 15; why.push("свіжий анонс Bybit"); }
+  c.score = Math.max(0, Math.min(100, Math.round(sc)));
+  c.reasons = why;
+  return c;
+}
+async function runRadar() {
+  if (radarBusy) return;
+  radarBusy = true; radarAt = Date.now();
+  $("radar-run").disabled = true;
+  $("radar-info").textContent = "Сканую…";
+  try {
+    const [tick, news] = await Promise.all([bx("/v5/market/tickers", { query: { category: "linear" } }), announcements()]);
+    const list = (tick.list || [])
+      .filter(t => t.symbol.endsWith("USDT") && Number(t.turnover24h) >= CFG.radarTurnover * 1e6 && Number(t.lastPrice) > 0)
+      .sort((a, b) => Number(b.turnover24h) - Number(a.turnover24h)).slice(0, CFG.radarCoins);
+    const pre = [];
+    let done = 0;
+    await pool(list, 6, async (t) => {
+      const rows = await k5(t.symbol);
+      done++; if (done % 15 === 0) $("radar-info").textContent = `Сканую… ${done}/${list.length}`;
+      if (rows.length < 40) return;
+      const closed = rows.slice(0, -1), last3 = rows.slice(-3), prev = closed.slice(-51, -3);
+      const volX = median(prev.map(r => r.v)) ? (last3.reduce((a, r) => a + r.v, 0) / 3) / median(prev.map(r => r.v)) : 1;
+      const last = Number(t.lastPrice);
+      const ago = rows[rows.length - 4] ? rows[rows.length - 4].c : last;
+      const hiPrev = Math.max(...closed.slice(-60, -3).map(r => r.h));
+      const hour = rows.slice(-12);
+      let tr = 0; for (let i = rows.length - 14; i < rows.length; i++) tr += Math.max(rows[i].h - rows[i].l, Math.abs(rows[i].h - rows[i - 1].c), Math.abs(rows[i].l - rows[i - 1].c));
+      const base = baseOf(t.symbol);
+      const re = new RegExp(`(^|[^A-Z0-9])${base.replace(/[^A-Z0-9]/g, "")}([^A-Z0-9]|$)`);
+      const n = base.length >= 2 ? news.find(a => re.test(a.title.toUpperCase())) : null;
+      pre.push({
+        symbol: t.symbol, last, volX, ch15: (last / ago - 1) * 100, newHigh: last > hiPrev,
+        fund: Number(t.fundingRate || 0) * 100, news: n || null,
+        hi: Math.max(...hour.map(r => r.h)), lo: Math.min(...hour.map(r => r.l)), atr: tr / 14,
+      });
+    });
+    pre.forEach(radarScore);
+    pre.sort((a, b) => b.score - a.score);
+    const top = pre.slice(0, 25);
+    $("radar-info").textContent = "Деталі: OI, стакан, лонги/шорти…";
+    await pool(top, 4, radarDetail);
+    top.forEach(radarScore);
+    top.sort((a, b) => b.score - a.score);
+    RADAR = top;
+    const hot = RADAR.filter(c => c.score >= CFG.radarScore);
+    for (const c of hot) {                                   // remember for the 1-hour check (once per symbol per hour)
+      if (RADARLOG.some(x => x.symbol === c.symbol && Date.now() - x.t < 3600e3)) continue;
+      RADARLOG.push({ t: Date.now(), symbol: c.symbol, score: c.score, price: c.last, why: c.reasons.join(", "), status: "wait" });
+    }
+    LS.set("radarLog", RADARLOG.slice(-2000));
+    $("radar-info").textContent = `${new Date().toLocaleTimeString()} · перевірено ${list.length} · анонсів за 72 год ${news.length} · бал ≥ ${CFG.radarScore}: ${hot.length}`;
+    renderRadar();
+    if (LS.get("radarPlace", false) && RUN) {
+      let room = CFG.maxSetups - SETUPS.length;
+      for (const c of hot) {
+        if (room <= 0) break;
+        if (SETUPS.some(x => x.symbol === c.symbol) || POS.some(x => x.symbol === c.symbol) || (COOL[c.symbol] || 0) > Date.now()) continue;
+        const msg = await placeRadar(c);
+        if (msg && !/Пропуск|замало/.test(msg)) room--;
+      }
+    }
+  } catch (e) { $("radar-info").textContent = "Помилка: " + e.message; log("Радар: " + e.message, "down"); }
+  finally { radarBusy = false; $("radar-run").disabled = false; }
+}
+function radarAsSetup(c) {
+  const mid = (c.hi + c.lo) / 2;
+  return { symbol: c.symbol, last: c.last, hi: c.hi, lo: c.lo, mid, width: (c.hi - c.lo) / mid * 100, squeeze: 0, er: 0, atr: c.atr, pos: 1, score: c.score, reasons: c.reasons };
+}
+async function placeRadar(c) {
+  try {
+    const msg = await arm(radarAsSetup(c), { kind: "rocket", tpR: CFG.radarTpR, sides: ["Buy"] });
+    log("⚡ " + msg + ` · чому: ${c.reasons.join(", ")}`, /Пропуск|замало/.test(msg) ? "mute" : "gold-t");
+    render(); return msg;
+  } catch (e) { log(`⚡ ${c.symbol}: ${e.message}`, "down"); return null; }
+}
+async function checkRadarLog() {
+  const due = RADARLOG.filter(x => x.status === "wait" && Date.now() - x.t >= 3600e3).slice(0, 10);
+  for (const x of due) {
+    try {
+      const r = await bx("/v5/market/kline", { query: { category: "linear", symbol: x.symbol, interval: "1", start: String(x.t), end: String(x.t + 3600e3), limit: "61" } });
+      const rows = (r.list || []).map(k => ({ h: +k[2], l: +k[3], c: +k[4], t: +k[0] })).sort((a, b) => a.t - b.t);
+      if (!rows.length) { x.status = "nodata"; continue; }
+      x.max = (Math.max(...rows.map(k => k.h)) / x.price - 1) * 100;
+      x.min = (Math.min(...rows.map(k => k.l)) / x.price - 1) * 100;
+      x.end = (rows[rows.length - 1].c / x.price - 1) * 100;
+      x.status = x.max >= 3 ? "hit" : "miss";
+    } catch (e) { /* try later */ }
+  }
+  if (due.length) { LS.set("radarLog", RADARLOG.slice(-2000)); renderRadarLog(); }
+}
+const pc = (v) => v == null ? "—" : (v >= 0 ? "+" : "") + v.toFixed(2) + "%";
+function renderRadar() {
+  $("radar").innerHTML = RADAR.length ? RADAR.map((c, i) => {
+    const hot = c.score >= CFG.radarScore;
+    const armed = SETUPS.some(s => s.symbol === c.symbol);
+    return `<tr><td><b>${esc(c.symbol)}</b></td>
+      <td><b class="${hot ? "up" : "mute"}">${c.score}</b> <span class="bar-mini" style="width:${Math.round(c.score * 0.6)}px;opacity:${hot ? 1 : .35}"></span></td>
+      <td>${c.last}</td><td class="${c.ch15 >= 0 ? "up" : "down"}">${pc(c.ch15)}</td>
+      <td class="${c.volX >= 3 ? "up" : ""}">×${c.volX.toFixed(1)}</td><td class="${(c.oi15 || 0) >= 2.5 ? "up" : ""}">${c.oi15 == null ? "—" : pc(c.oi15)}</td>
+      <td class="${(c.book || 1) >= 1.4 ? "up" : (c.book || 1) <= 0.6 ? "down" : ""}">${c.book == null ? "—" : "×" + c.book.toFixed(2)}</td>
+      <td>${c.longPct == null ? "—" : (100 - c.longPct).toFixed(0) + "%"}</td>
+      <td class="${c.fund < 0 ? "up" : ""}">${c.fund.toFixed(3)}%</td>
+      <td style="white-space:normal;max-width:180px">${c.news ? `<a href="${esc(c.news.url)}" target="_blank" rel="noopener" style="color:var(--gold)">${esc(c.news.title.slice(0, 60))}</a>` : "—"}</td>
+      <td style="white-space:normal;min-width:220px" class="mute">${esc(c.reasons.join(" · ") || "—")}</td>
+      <td>${armed ? `<span class="tag armed">стоїть</span>` : `<button data-radar="${i}" style="min-height:30px">Поставити</button>`}</td></tr>`;
+  }).join("") : `<tr><td colspan="12" class="mute">Зараз сильних сигналів немає</td></tr>`;
+  $("radar").querySelectorAll("[data-radar]").forEach(b => b.onclick = async () => {
+    if (!$("k-key").value.trim()) { log("Спочатку введіть ключі на вкладці «Бот»", "down"); return; }
+    b.disabled = true; await placeRadar(RADAR[Number(b.dataset.radar)]); renderRadar();
+  });
+  renderRadarLog();
+}
+function renderRadarLog() {
+  const done = RADARLOG.filter(x => x.status === "hit" || x.status === "miss");
+  const hits = done.filter(x => x.status === "hit");
+  const avg = (a, k) => a.length ? a.reduce((s, x) => s + x[k], 0) / a.length : 0;
+  const strong = done.filter(x => x.score >= 75), sh = strong.filter(x => x.status === "hit");
+  const k = [
+    ["Сигналів перевірено", done.length], ["Чекають години", RADARLOG.filter(x => x.status === "wait").length],
+    ["Влучань (макс ≥ +3%)", done.length ? (hits.length / done.length * 100).toFixed(0) + "%" : "—"],
+    ["Сер. макс за год", pc(done.length ? avg(done, "max") : null)], ["Сер. через 1 год", pc(done.length ? avg(done, "end") : null)],
+    ["Сер. мін за год", pc(done.length ? avg(done, "min") : null)],
+    ["Бал ≥ 75: влучань", strong.length ? `${(sh.length / strong.length * 100).toFixed(0)}% з ${strong.length}` : "—"],
+  ];
+  $("radar-kpis").innerHTML = k.map(([n, v]) => `<div class="kpi"><span>${n}</span><b>${v}</b></div>`).join("");
+  $("radar-log").innerHTML = RADARLOG.length ? RADARLOG.slice().reverse().slice(0, 150).map(x => `<tr>
+    <td>${new Date(x.t).toLocaleString([], { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}</td>
+    <td><b>${esc(x.symbol)}</b></td><td>${x.score}</td><td>${x.price}</td>
+    <td class="up">${pc(x.max)}</td><td class="down">${pc(x.min)}</td><td class="${(x.end || 0) >= 0 ? "up" : "down"}">${pc(x.end)}</td>
+    <td>${x.status === "wait" ? `<span class="tag armed">чекаю ${Math.max(0, Math.ceil((x.t + 3600e3 - Date.now()) / 60000))} хв</span>` : x.status === "hit" ? `<span class="tag long">влучання</span>` : x.status === "miss" ? `<span class="tag short">мимо</span>` : "—"}</td>
+    <td class="mute" style="white-space:normal;min-width:200px">${esc(x.why)}</td></tr>`).join("")
+    : `<tr><td colspan="9" class="mute">Ще немає сигналів</td></tr>`;
+}
+function paintRadarButtons() {
+  const a = LS.get("radarAuto", false), p = LS.get("radarPlace", false);
+  $("radar-auto").textContent = "Авто-оновлення: " + (a ? `кожні ${CFG.radarEvery} хв` : "вимк");
+  $("radar-auto").className = a ? "green" : "";
+  $("radar-place").textContent = "Авто-ставити: " + (p ? "увімк (коли бот запущено)" : "вимк");
+  $("radar-place").className = p ? "green" : "";
+}
+$("radar-run").onclick = () => runRadar();
+$("radar-auto").onclick = () => { LS.set("radarAuto", !LS.get("radarAuto", false)); paintRadarButtons(); if (LS.get("radarAuto", false)) runRadar(); };
+$("radar-place").onclick = () => {
+  const on = !LS.get("radarPlace", false);
+  if (on && !confirm("Бот сам ставитиме Buy Stop на монети з балом ≥ порогу (коли бот запущено).\nЦе агресивна торгівля: багато сигналів не дадуть руху. Увімкнути?")) return;
+  LS.set("radarPlace", on); paintRadarButtons();
+};
+$("radar-csv").onclick = () => {
+  const cols = ["t", "symbol", "score", "price", "max", "min", "end", "status", "why"];
+  const lines = [cols.join(",")].concat(RADARLOG.map(x => cols.map(c => {
+    let v = c === "t" ? new Date(x.t).toISOString() : x[c]; v = v ?? "";
+    return /[",\n]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : v;
+  }).join(",")));
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob(["\ufeff" + lines.join("\n")], { type: "text/csv" }));
+  a.download = "radar-signals.csv"; a.click();
+};
+$("radar-clear").onclick = () => { if (confirm("Очистити історію сигналів радара?")) { RADARLOG = []; LS.set("radarLog", []); renderRadarLog(); } };
+document.querySelectorAll(".tabs [data-tab]").forEach(b => b.onclick = () => {
+  document.querySelectorAll(".tabs [data-tab]").forEach(x => x.classList.toggle("act", x === b));
+  $("tab-bot").classList.toggle("hidden", b.dataset.tab !== "bot");
+  $("tab-radar").classList.toggle("hidden", b.dataset.tab !== "radar");
+  LS.set("tab", b.dataset.tab);
+});
+setInterval(() => {
+  if (LS.get("radarAuto", false) && !radarBusy && Date.now() - radarAt >= CFG.radarEvery * 60e3) runRadar();
+  checkRadarLog();
+}, 30000);
+
 // ------------------------------------------------------------------ dip grid
 const dipOn = (s) => CFG.dipMode === "all" || (CFG.dipMode === "rocket" && s.kind === "rocket");
 function dipLink(symbol, side, k) { return ("bg" + symbol.slice(0, 11) + (side === "Buy" ? "B" : "S") + k + Date.now().toString(36)).slice(0, 36); }
@@ -931,6 +1230,11 @@ $("btn-clear-j").onclick = () => { if (confirm("Очистити журнал у
 
 // ------------------------------------------------------------------ start
 buildSettings();
+buildRadarSettings();
+paintRadarButtons();
+renderRadarLog();
+if (LS.get("tab", "bot") === "radar") document.querySelector('.tabs [data-tab="radar"]').click();
+setTimeout(checkRadarLog, 2000);
 paintMode();
 loadKeys();
 render();
