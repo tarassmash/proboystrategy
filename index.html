@@ -104,6 +104,11 @@ details summary { cursor: pointer; color: var(--mute); font-size: 12px; }
     <details style="margin-top:10px">
       <summary>Як це працює</summary>
       <div class="sub" style="margin-top:8px; line-height:1.6">
+        <b>🪜 Сітка на відкат.</b> Коли пробій спрацював і ціна пройшла ≥ заданої кількості R, бот ставить лісенку лімітних покупок
+        (для шорту — продажів) на рівнях відкату від 23.6% до заданої глибини руху, але завжди вище стопу і вище точки входу.
+        Кожна виконана покупка одразу отримує свою лімітну продаж (reduce-only) на відскоку на один крок сітки, після продажу
+        покупка ставиться знову. Так бот докуповує корекцію і заробляє на відскоках, поки ракета летить.
+        Стоп і тейк позиції діють на весь обсяг, включно з докупленим. Коли позиція закривається — вся сітка знімається.<br><br>
         1. Кожні N хвилин бот бере найліквідніші монети і шукає <b>стиснення</b>: вузький діапазон за останні свічки, Bollinger-ширина в нижніх процентилях, ціна всередині діапазону, ринок без тренду (ER низький).<br>
         2. Над діапазоном ставить <b>Buy Stop</b> (тригер = максимум + буфер), під ним <b>Sell Stop</b> (мінімум − буфер). Тип: стоп-ліміт або стоп-маркет.<br>
         3. До кожного ордера одразу прив'язані <b>стоп-лос</b> і <b>тейк-профіт</b> — біржа захищає позицію сама.<br>
@@ -168,6 +173,11 @@ const FIELDS = [
   ["rocketSides", "🚀 Ракети: сторони", "long", null, null, null, "long|both"],
   ["rocketCoins", "🚀 Скільки монет сканувати", 150, 10, 600, true, "включно з дрібними"],
   ["rocketTurnover", "🚀 Мін. обіг 24 год, млн $", 5, 0, 100000, false, "дрібні монети летять сильніше"],
+  ["dipMode", "🪜 Сітка на відкат", "rocket", null, null, null, "off|rocket|all"],
+  ["dipLevels", "🪜 Рівнів сітки", 4, 1, 10, true, "лімітки на відкаті після пробою"],
+  ["dipSize", "🪜 Розмір рівня, % позиції", 50, 5, 200, false, "від початкової кількості"],
+  ["dipDepth", "🪜 Глибина відкату, % руху", 61.8, 25, 100, false, "рівні від 23.6% до цієї глибини"],
+  ["dipStartR", "🪜 Ставити сітку після, R", 1, 0, 10, false, "коли ціна вже відійшла від входу"],
   ["margin", "Маржа на угоду, USDT", 5, 1, 100000, false, "скільки своїх грошей у позиції"],
   ["leverage", "Плече", 10, 1, 100, true, "не вище максимуму монети"],
   ["maxSetups", "Макс. сетапів одночасно", 4, 1, 30, true, "пари Buy/Sell Stop + відкриті позиції"],
@@ -194,6 +204,7 @@ const FIELDS = [
   ["triggerBy", "Тригер за ціною", "LastPrice", null, null, null, "LastPrice|MarkPrice"],
 ];
 const SELECTS = {
+  dipMode: [["rocket", "Лише для ракет"], ["all", "Для всіх пробоїв"], ["off", "Вимкнено"]],
   rocketSides: [["long", "Лише лонг (вгору)"], ["both", "Обидва боки"]],
   slMode: [["mid", "Середина діапазону"], ["edge", "Протилежна межа"], ["atr", "Від тригера × ATR"]],
   orderType: [["Limit", "Стоп-ліміт"], ["Market", "Стоп-маркет"]],
@@ -588,6 +599,80 @@ $("btn-mode").onclick = () => {
   if (RUN) loop();
 };
 
+// ------------------------------------------------------------------ dip grid
+const dipOn = (s) => CFG.dipMode === "all" || (CFG.dipMode === "rocket" && s.kind === "rocket");
+function dipLink(symbol, side, k) { return ("bg" + symbol.slice(0, 11) + (side === "Buy" ? "B" : "S") + k + Date.now().toString(36)).slice(0, 36); }
+async function placeLimit(symbol, side, price, qty, linkId, reduceOnly, idx) {
+  const body = { category: "linear", symbol, side, orderType: "Limit", qty, price, timeInForce: "PostOnly", orderLinkId: linkId, reduceOnly, positionIdx: idx };
+  return bx("/v5/order/create", { method: "POST", body, auth: true });
+}
+async function orderState(symbol, linkId) {
+  const r = await bx("/v5/order/history", { query: { category: "linear", symbol, orderLinkId: linkId, limit: "5" }, auth: true });
+  const row = (r.list || []).find(o => o.orderLinkId === linkId);
+  if (!row) return "unknown";
+  if (row.orderStatus === "Filled") return "filled";
+  if (["New", "PartiallyFilled", "Untriggered"].includes(row.orderStatus)) return "live";
+  return Number(row.cumExecQty || 0) > 0 ? "filled" : "cancelled";
+}
+async function buildDip(s, pos, sp, long, idx) {
+  const entry0 = s.entry0 || Number(pos.avgPrice);
+  const leg = (long ? s.buy : s.sell) || legsOf(s)[0];
+  const ext = long ? s.hiSince : s.loSince;              // best price since entry
+  const move = Math.abs(ext - entry0);
+  if (move <= 0) return;
+  const floor = long ? Math.max(entry0 * 1.004, Number(leg.sl) * 1.003) : Math.min(entry0 * 0.996, Number(leg.sl) * 0.997);
+  const n = CFG.dipLevels, depth = CFG.dipDepth / 100;
+  const qty = align(Number(s.qty) * CFG.dipSize / 100, sp.step, false);
+  if (Number(qty) < sp.minQty || Number(qty) * entry0 < sp.minNotional) {
+    s.dip = { levels: [], skipped: true };
+    log(`${s.symbol}: сітку на відкат пропущено — рівень ${qty} менший за мінімум біржі (збільште % розміру рівня)`, "mute");
+    return;
+  }
+  const levels = [];
+  for (let k = 0; k < n; k++) {
+    const frac = n === 1 ? 0.382 : 0.236 + (depth - 0.236) * k / (n - 1);
+    let px = long ? ext - move * frac : ext + move * frac;
+    if (long ? px < floor : px > floor) continue;
+    const price = align(px, sp.tick, !long);
+    if (levels.some(l => l.price === price)) continue;
+    levels.push({ k, price, qty, state: "add", cycles: 0 });
+  }
+  if (!levels.length) { s.dip = { levels: [], skipped: true }; log(`${s.symbol}: рух ще замалий для сітки на відкат (рівні нижче стопу/входу)`, "mute"); return; }
+  const step = levels.length > 1 ? Math.abs(Number(levels[0].price) - Number(levels[1].price)) : move * 0.236;
+  s.dip = { levels, step: Number(align(step, sp.tick, true)), placedAt: Date.now(), fills: 0, cycles: 0 };
+  for (const l of levels) {
+    l.id = dipLink(s.symbol, long ? "Buy" : "Sell", l.k);
+    try { await placeLimit(s.symbol, long ? "Buy" : "Sell", l.price, qty, l.id, false, idx); }
+    catch (e) { l.state = "dead"; log(`${s.symbol}: рівень ${l.price} не прийнято: ${e.message}`, "down"); }
+  }
+  const ok = levels.filter(l => l.state === "add");
+  if (ok.length) log(`${s.symbol}: 🪜 сітка на відкат — ${long ? "Buy" : "Sell"} ${ok.map(l => l.price).join(", ")} по ${qty}, відскок +${s.dip.step}`, "gold-t");
+}
+async function runDip(s, live, long, idx) {
+  const sp = await spec(s.symbol);
+  for (const l of s.dip.levels) {
+    if (l.state === "dead" || live.has(l.id)) continue;
+    const st = await orderState(s.symbol, l.id);
+    if (st === "live" || st === "unknown") continue;
+    if (st === "cancelled") { l.state = "dead"; continue; }
+    if (l.state === "add") {                                   // add filled -> take the bounce
+      s.dip.fills++;
+      const tp = align(long ? Number(l.price) + s.dip.step : Number(l.price) - s.dip.step, sp.tick, long);
+      l.id = dipLink(s.symbol, long ? "Sell" : "Buy", l.k); l.state = "bounce"; l.tp = tp;
+      try { await placeLimit(s.symbol, long ? "Sell" : "Buy", tp, l.qty, l.id, true, idx); log(`${s.symbol}: 🪜 докуплено ${l.qty} @ ${l.price} на відкаті, продаж на відскоку ${tp}`, "up"); }
+      catch (e) { l.state = "dead"; log(`${s.symbol}: відскок ${tp} не прийнято: ${e.message}`, "down"); }
+    } else {                                                   // bounce filled -> re-arm the add
+      l.cycles++; s.dip.cycles++;
+      l.id = dipLink(s.symbol, long ? "Buy" : "Sell", l.k); l.state = "add";
+      try { await placeLimit(s.symbol, long ? "Buy" : "Sell", l.price, l.qty, l.id, false, idx); log(`${s.symbol}: 🪜 відскок ${l.tp} взято (цикл ${l.cycles}), знову чекаю відкат до ${l.price}`, "up"); }
+      catch (e) { l.state = "dead"; log(`${s.symbol}: повтор рівня ${l.price} не прийнято: ${e.message}`, "down"); }
+    }
+  }
+}
+async function cancelDip(s) {
+  for (const l of (s.dip && s.dip.levels) || []) if (l.state !== "dead") await cancelLink(s.symbol, l.id);
+}
+
 // ------------------------------------------------------------------ manage
 async function closedPnl(symbol, from) {
   const r = await bx("/v5/position/closed-pnl", { query: { category: "linear", symbol, startTime: String(from - 60e3), limit: "50" }, auth: true });
@@ -618,12 +703,14 @@ async function recordClose(s, now, forced = "") {
     exitPx = rows.length ? Number(rows[rows.length - 1].avgExitPrice) : null;  // oldest close = this leg
     if (!forced && rows.length) exitPx = Number(rows[0].avgExitPrice);
   } catch (e) { log(`${s.symbol}: PnL не прочитано: ${e.message}`, "down"); }
-  const risk = Math.abs((s.entry || Number(leg.trigger)) - Number(leg.sl));
-  const rMult = exitPx && risk ? ((long ? exitPx - s.entry : s.entry - exitPx) / risk) : 0;
+  const e0 = s.entry0 || s.entry || Number(leg.trigger);
+  const risk = Math.abs(e0 - Number(leg.sl));
+  const rMult = exitPx && risk ? ((long ? exitPx - e0 : e0 - exitPx) / risk) : 0;
   const why = forced || (exitPx ? exitReason(s, exitPx) : "Закрито");
   JOURNAL.push({ symbol: s.symbol, side: long ? "LONG" : "SHORT", entry: s.entry, exit: exitPx, result: why, r: Math.round(rMult * 100) / 100,
     maxR: Math.round((s.maxR || 0) * 100) / 100, pnl: Math.round(pnl * 1e4) / 1e4, openedAt: s.openedAt, closedAt: now,
-    width: s.width, squeeze: s.squeeze, er: s.er, lev: s.lev, kind: s.kind || "breakout", score: s.score ?? null, why: (s.reasons || []).join(", ") });
+    width: s.width, squeeze: s.squeeze, er: s.er, lev: s.lev, kind: s.kind || "breakout", score: s.score ?? null, why: (s.reasons || []).join(", "),
+    dipFills: s.dip ? s.dip.fills || 0 : 0, dipCycles: s.dip ? s.dip.cycles || 0 : 0 });
   log(`${s.symbol}: закрито — ${why}, ${rMult >= 0 ? "+" : ""}${rMult.toFixed(2)}R, PnL ${pnl >= 0 ? "+" : ""}${pnl.toFixed(4)} USDT`, pnl >= 0 ? "up" : "down");
 }
 async function manage() {
@@ -631,13 +718,24 @@ async function manage() {
   POS = (posRes.list || []).filter(p => Number(p.size) > 0);
   const stopRes = await bx("/v5/order/realtime", { query: { category: "linear", settleCoin: "USDT", orderFilter: "StopOrder", limit: "50" }, auth: true });
   const live = new Set((stopRes.list || []).map(o => o.orderLinkId));
+  if (SETUPS.some(x => x.dip && x.dip.levels && x.dip.levels.length)) {
+    let cursor = "";
+    for (let i = 0; i < 4; i++) {
+      const q = { category: "linear", settleCoin: "USDT", limit: "50" };
+      if (cursor) q.cursor = cursor;
+      const r = await bx("/v5/order/realtime", { query: q, auth: true });
+      (r.list || []).forEach(o => live.add(o.orderLinkId));
+      cursor = r.nextPageCursor || "";
+      if (!cursor) break;
+    }
+  }
   const now = Date.now();
   for (const s of [...SETUPS]) {
     const pos = POS.find(p => p.symbol === s.symbol);
     if (s.state === "armed") {
       if (pos) {
         s.state = pos.side === "Buy" ? "long" : "short";
-        s.entry = Number(pos.avgPrice);
+        s.entry = Number(pos.avgPrice); s.entry0 = s.entry;
         s.openedAt = now;
         const other = s.state === "long" ? s.sell : s.buy;
         if (other) await cancelLink(s.symbol, other.id);
@@ -661,13 +759,19 @@ async function manage() {
       // first leg was stopped out and the opposite stop fired while the page was closed
       await recordClose(s, now, "Стоп-лос (сторінка була закрита)");
       s.state = pos.side === "Buy" ? "long" : "short";
-      s.entry = Number(pos.avgPrice); s.openedAt = now; s.beDone = false; s.trailOn = false; s.maxR = 0;
+      await cancelDip(s); s.dip = null;
+      s.entry = Number(pos.avgPrice); s.entry0 = s.entry; s.openedAt = now; s.beDone = false; s.trailOn = false; s.maxR = 0;
+      s.hiSince = s.loSince = s.entry;
       log(`${s.symbol}: поки сторінка була закрита, спрацював протилежний бік → ${s.state.toUpperCase()} @ ${s.entry}`, "gold-t");
       continue;
     }
     if (pos) {
-      const mark = Number(pos.markPrice), entry = Number(pos.avgPrice) || s.entry;
-      s.entry = entry;
+      const mark = Number(pos.markPrice);
+      if (!s.entry0) s.entry0 = Number(pos.avgPrice) || s.entry;
+      const entry = s.entry0;                                  // R is measured from the breakout entry, not the averaged one
+      s.entry = Number(pos.avgPrice) || s.entry;
+      s.hiSince = Math.max(s.hiSince || mark, mark);
+      s.loSince = Math.min(s.loSince || mark, mark);
       const risk = Math.abs(entry - Number(leg.sl)) || legsOf(s)[0].risk;
       const r = (long ? mark - entry : entry - mark) / risk;
       s.maxR = Math.max(s.maxR || 0, r);
@@ -687,11 +791,18 @@ async function manage() {
           s.trailOn = true; log(`${s.symbol}: +${r.toFixed(2)}R — трейлінг-стоп ${dist}`, "up");
         } catch (e) { log(`${s.symbol}: трейлінг не вдався: ${e.message}`, "down"); }
       }
+      if (dipOn(s)) {
+        try {
+          if (!s.dip && r >= CFG.dipStartR) await buildDip(s, pos, sp, long, idx);
+          else if (s.dip && s.dip.levels.length) await runDip(s, live, long, idx);
+        } catch (e) { log(`${s.symbol}: сітка на відкат: ${e.message}`, "down"); }
+      }
       continue;
     }
     // position gone → closed
     await recordClose(s, now);
     await cancelAll(s);
+    await cancelDip(s);
     SETUPS = SETUPS.filter(x => x !== s);
     COOL[s.symbol] = now + CFG.cooldownMin * 60e3;
   }
@@ -725,10 +836,10 @@ $("btn-start").onclick = async () => {
   setRun(true); lastScan = 0; log("Бот запущено", "up"); loop();
 };
 $("btn-stop").onclick = async () => {
-  if (!confirm("Зупинити бота і зняти всі його Buy/Sell Stop ордери?\nВідкриті позиції лишаться зі своїми стоп-лосом і тейк-профітом.")) return;
+  if (!confirm("Зупинити бота і зняти всі його Buy/Sell Stop ордери?\nСітки на відкат теж буде знято. Відкриті позиції лишаться зі своїми стоп-лосом і тейк-профітом.")) return;
   setRun(false);
   for (const s of [...SETUPS]) {
-    if (s.state !== "armed") continue;
+    if (s.state !== "armed") { try { await cancelDip(s); if (s.dip) s.dip.levels = []; } catch (e) { log(`${s.symbol}: ${e.message}`, "down"); } continue; }
     try { await cancelAll(s); SETUPS = SETUPS.filter(x => x !== s); }
     catch (e) { log(`${s.symbol}: ${e.message}`, "down"); }
   }
@@ -765,7 +876,8 @@ const tm = (t) => t ? new Date(t).toLocaleString([], { day: "2-digit", month: "2
 function dur(a, b) { const m = Math.max(0, (b - a) / 60000); return m < 60 ? Math.round(m) + " хв" : (m / 60).toFixed(1) + " год"; }
 function render() {
   $("setups").innerHTML = SETUPS.length ? SETUPS.map((s, i) => {
-    const tag = s.state === "armed" ? `<span class="tag armed">чекає пробою</span>` : `<span class="tag ${s.state}">${s.state === "long" ? "LONG" : "SHORT"}${s.beDone ? " · БЗ" : ""}${s.trailOn ? " · трейл" : ""}</span>`;
+    const tag = s.state === "armed" ? `<span class="tag armed">чекає пробою</span>` : `<span class="tag ${s.state}">${s.state === "long" ? "LONG" : "SHORT"}${s.beDone ? " · БЗ" : ""}${s.trailOn ? " · трейл" : ""}</span>`
+      + (s.dip && s.dip.levels && s.dip.levels.length ? ` <span class="tag armed" title="рівні: ${s.dip.levels.map(l => l.price + (l.state === "bounce" ? "✓" : "")).join(", ")}">🪜 ${s.dip.levels.filter(l => l.state === "bounce").length}/${s.dip.levels.filter(l => l.state !== "dead").length} · циклів ${s.dip.cycles}</span>` : "");
     const leg = (s.state === "short" ? s.sell : s.buy) || legsOf(s)[0];
     return `<tr><td><b>${s.kind === "rocket" ? "🚀 " : ""}${esc(s.symbol)}</b>${s.score != null ? ` <span class="mute">${s.score}</span>` : ""}</td><td>${tag}</td>
       <td>${s.lo} – ${s.hi} <span class="mute">${s.width.toFixed(2)}%</span></td>
@@ -800,13 +912,13 @@ function render() {
   $("kpis").innerHTML = k.map(([n, v]) => `<div class="kpi"><span>${n}</span><b>${v}</b></div>`).join("");
   $("journal").innerHTML = JOURNAL.length ? JOURNAL.slice().reverse().slice(0, 200).map(t => `<tr>
     <td>${tm(t.closedAt)}</td><td title="${esc(t.why || "")}"><b>${t.kind === "rocket" ? "🚀 " : ""}${esc(t.symbol)}</b>${t.score != null ? ` <span class="mute">${t.score}</span>` : ""}</td><td class="${t.side === "LONG" ? "up" : t.side === "SHORT" ? "down" : "mute"}">${t.side}</td>
-    <td>${t.entry ?? "—"}</td><td>${t.exit ?? "—"}</td><td>${esc(t.result)}</td><td>${t.noTrade ? "—" : fx(t.r, 2)}${t.maxR ? ` <span class="mute">(макс ${t.maxR})</span>` : ""}</td>
+    <td>${t.entry ?? "—"}</td><td>${t.exit ?? "—"}</td><td>${esc(t.result)}${t.dipFills ? ` <span class="mute">· 🪜 ${t.dipFills} докупок, ${t.dipCycles} відскоків</span>` : ""}</td><td>${t.noTrade ? "—" : fx(t.r, 2)}${t.maxR ? ` <span class="mute">(макс ${t.maxR})</span>` : ""}</td>
     <td class="${t.pnl > 0 ? "up" : t.pnl < 0 ? "down" : "mute"}">${t.noTrade ? "—" : fx(t.pnl)}</td><td>${t.openedAt ? dur(t.openedAt, t.closedAt) : "—"}</td>
     <td class="mute">${t.width ? t.width.toFixed(2) + "% · BB " + Math.round(t.squeeze) + " · ER " + Number(t.er).toFixed(2) : "—"}</td></tr>`).join("")
     : `<tr><td colspan="10" class="mute">Угод ще не було</td></tr>`;
 }
 $("btn-csv").onclick = () => {
-  const cols = ["closedAt", "openedAt", "kind", "score", "why", "symbol", "side", "entry", "exit", "result", "r", "maxR", "pnl", "width", "squeeze", "er", "lev"];
+  const cols = ["closedAt", "openedAt", "kind", "score", "why", "symbol", "side", "entry", "exit", "result", "r", "maxR", "pnl", "width", "squeeze", "er", "lev", "dipFills", "dipCycles"];
   const lines = [cols.join(",")].concat(JOURNAL.map(t => cols.map(c => {
     let v = t[c]; if ((c === "closedAt" || c === "openedAt") && v) v = new Date(v).toISOString();
     v = v ?? ""; return /[",\n]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : v;
