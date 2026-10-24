@@ -45,7 +45,12 @@ const DEFAULTS = {
   learnMin: 40,          // trades with recorded signals needed before the filter acts
   optExits: true,        // re-tune take/stop on recorded price paths every optEvery trades
   optEvery: 15,
+  style: "flow",         // "flow" = book + tape + icebergs/absorption/spoof; "pressure" = book pressure only, tiny frequent takes
+  pressLevels: 5,        // levels per side counted for the pressure
 };
+// preset of the "book pressure" style: tiny takes just above the maker fees, quick exits when the pressure goes away
+const PRESSURE = { style: "pressure", tpPct: 0.08, slPct: 0.25, scoreIn: 0.55, entryWaitSec: 5, timeStopSec: 45, holdMaxSec: 120,
+  ride: false, adaptive: false, flipExit: true, cancelOnFade: true, needAgree: false, maxPositions: 3, cooldownSec: 20 };
 
 function create({ ev, log, engineLog, lsGet, lsSet, env, testWs }) {
   let ST_PICK_NOW = false;
@@ -90,6 +95,16 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs }) {
       }
     }
     const bb = Math.max(...m.bids.keys(), 0), ba = Math.min(...m.asks.keys(), Infinity);
+    // book pressure: notional of the nearest levels on each side, and the queue at the best prices (sampled every 100 ms)
+    if (bb > 0 && ba < Infinity && now - (m.pressAt || 0) >= 100) {
+      m.pressAt = now;
+      const nb = [...m.bids.entries()].sort((a, b) => b[0] - a[0]).slice(0, P.pressLevels);
+      const na = [...m.asks.entries()].sort((a, b) => a[0] - b[0]).slice(0, P.pressLevels);
+      const bs = nb.reduce((s, [p, q]) => s + p * q, 0), as = na.reduce((s, [p, q]) => s + p * q, 0);
+      const qb = (m.bids.get(bb) || 0) * bb, qa = (m.asks.get(ba) || 0) * ba;
+      (m.press = m.press || []).push([now, bs + as ? bs / (bs + as) : 0.5, qb + qa ? qb / (qb + qa) : 0.5]);
+      m.press = m.press.filter(x => now - x[0] < 5000);
+    }
     if (bb > 0 && ba < Infinity) { m.bid = bb; m.ask = ba; m.ready = true; }
     if (!m.tick && m.bids.size > 2) {
       const ps = [...m.bids.keys()].sort((a, b) => b - a);
@@ -165,10 +180,24 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs }) {
       + (iceBid ? 0.12 : 0) + (absBull ? 0.15 : 0) + (spoofAsk ? 0.08 : 0) - (spoofBid ? 0.15 : 0) - (iceAsk ? 0.1 : 0);
     let short = 0.30 * Math.max(0, (0.5 - imb) * 2) + 0.25 * Math.max(0, -delta) + (impulseDn ? 0.2 : 0)
       + (iceAsk ? 0.12 : 0) + (absBear ? 0.15 : 0) + (spoofBid ? 0.08 : 0) - (spoofAsk ? 0.15 : 0) - (iceBid ? 0.1 : 0);
+    // "pressure" style: the side whose book is heavier for the last 2 s (and whose best-price queue is longer),
+    // with the tape not pushing against it
+    let press = null;
+    const ph = (m.press || []).filter(x => now - x[0] < 2000);
+    if (ph.length >= 5) {
+      const lvl = ph.reduce((a, x) => a + x[1], 0) / ph.length, que = ph.reduce((a, x) => a + x[2], 0) / ph.length;
+      const steady = ph.filter(x => (x[1] - 0.5) * (lvl - 0.5) > 0).length / ph.length;   // how much of the time it pointed the same way
+      press = { lvl: +lvl.toFixed(2), que: +que.toFixed(2), steady: +steady.toFixed(2) };
+      if (P.style === "pressure") {
+        const tape = Math.max(-1, Math.min(1, delta * 2));
+        long = 0.55 * Math.max(0, (lvl - 0.5) * 2) + 0.3 * Math.max(0, (que - 0.5) * 2) + 0.15 * steady * (lvl > 0.5 ? 1 : 0) + (tape > 0 ? 0.1 * tape : 0.25 * tape);
+        short = 0.55 * Math.max(0, (0.5 - lvl) * 2) + 0.3 * Math.max(0, (0.5 - que) * 2) + 0.15 * steady * (lvl < 0.5 ? 1 : 0) + (tape < 0 ? -0.1 * tape : -0.25 * tape);
+      }
+    } else if (P.style === "pressure") { long = 0; short = 0; }
     long = Math.max(0, Math.min(1, long)); short = Math.max(0, Math.min(1, short));
     return {
       sym, bid: m.bid, ask: m.ask, last: m.last, spreadTicks, imb: +imb.toFixed(2), delta: +delta.toFixed(2), burst: +burst.toFixed(1),
-      move10: +move10.toFixed(3), iceBid, iceAsk, absBull, absBear, spoofBid, spoofAsk, long: +long.toFixed(2), short: +short.toFixed(2),
+      move10: +move10.toFixed(3), press, iceBid, iceAsk, absBull, absBear, spoofBid, spoofAsk, long: +long.toFixed(2), short: +short.toFixed(2),
     };
   }
 
@@ -235,7 +264,7 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs }) {
     }
     // the mirror of the normal trade: take and stop swap places
     const tpBase = p.inv ? P.slPct : P.tpPct, slBase = p.inv ? P.tpPct : P.slPct;
-    p.tpPct = Math.max(0.1, +(tpBase * f).toFixed(3)); p.slPct = +(slBase * f).toFixed(3); p.f = f;
+    p.tpPct = Math.max(P.style === "pressure" ? 0.06 : 0.1, +(tpBase * f).toFixed(3)); p.slPct = +(slBase * f).toFixed(3); p.f = f;
     const tp = await alignP(entryPx * (1 + (long ? 1 : -1) * p.tpPct / 100), p.tick, long);
     const sl = await alignP(entryPx * (1 - (long ? 1 : -1) * p.slPct / 100), p.tick, !long);
     p.tp = Number(tp); p.sl = Number(sl);
@@ -517,6 +546,11 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs }) {
             const best = long ? sig.ask : sig.bid;
             try { await amend(p.sym, p.tpId, best); p.tp = best; p.leaving = "розворот"; engineLog(`⚡⚡ ${p.sym}: потік розвернувся проти (${against.toFixed(2)}) — виходжу лімітом ${best}`, "mute"); } catch (e) { /* filled */ }
           }
+          // pressure style: the book stopped leaning our way -> leave at once with a limit at the best price
+          if (P.style === "pressure" && !p.inv && !p.leaving && sig && sig.press && (long ? sig.press.lvl : 1 - sig.press.lvl) < 0.47) {
+            const best = long ? sig.ask : sig.bid;
+            try { await amend(p.sym, p.tpId, best); p.tp = best; p.leaving = "тиск зник"; engineLog(`📊 ${p.sym}: тиск стакану зник (${sig.press.lvl}) — виходжу лімітом ${best}`, "mute"); } catch (e) { /* filled */ }
+          }
           // no progress for timeStopSec: leave near break-even (entry + fees) with the limit take
           const tpPctNow = p.tpPct || P.tpPct;
           if (!p.leaving && P.timeStopSec > 0 && now - p.openedAt > P.timeStopSec * 1000 && gone < tpPctNow * 0.3) {
@@ -610,7 +644,7 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs }) {
 
   // ---------------- control + views ----------------
   const NUM = { margin: [1, 100000], leverage: [1, 50], tpPct: [0.06, 2], slPct: [0.1, 3], scoreIn: [0.3, 0.95], bandPct: [0.05, 1], burstX: [1.2, 10],
-    wallX: [2, 30], spoofSec: [1, 20], icebergX: [1.5, 20], entryWaitSec: [2, 60], holdMaxSec: [30, 3600], maxPositions: [1, 10], cooldownSec: [0, 3600], dailyLossPct: [0, 20], timeStopSec: [0, 3600], coinCount: [1, 12], minTurnoverM: [5, 5000], pickEveryMin: [2, 120], invertMin: [10, 200], learnMin: [20, 400], optEvery: [5, 100] };
+    wallX: [2, 30], spoofSec: [1, 20], icebergX: [1.5, 20], entryWaitSec: [2, 60], holdMaxSec: [30, 3600], maxPositions: [1, 10], cooldownSec: [0, 3600], dailyLossPct: [0, 20], timeStopSec: [0, 3600], pressLevels: [1, 25], coinCount: [1, 12], minTurnoverM: [5, 5000], pickEveryMin: [2, 120], invertMin: [10, 200], learnMin: [20, 400], optEvery: [5, 100] };
   function setParams(o, caps = {}) {
     const changed = [];
     // coins named explicitly win over the automatic volatility pick
@@ -626,6 +660,8 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs }) {
         if (P[k] !== n) { changed.push(`${k} ${P[k]}→${n}`); P[k] = n; }
       } else if (["ride", "useIceberg", "useAbsorption", "useSpoof", "on", "needAgree", "cancelOnFade", "flipExit", "adaptive", "autoPrune", "autoCoins", "learn", "optExits"].includes(k) && typeof v === "boolean") {
         if (P[k] !== v) { changed.push(`${k} ${P[k]}→${v}`); P[k] = v; }
+      } else if (k === "style" && ["flow", "pressure"].includes(v)) {
+        changed.push(...setStyle(v));
       } else if (k === "invert" && ["off", "on", "auto"].includes(v)) {
         if (P[k] !== v) { changed.push(`invert ${P[k]}→${v}`); P[k] = v; }
       } else if (k === "symbols" && Array.isArray(v)) {
@@ -635,6 +671,19 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs }) {
     }
     save();
     return changed;
+  }
+  // switch the style; the flow settings are kept and come back when the pressure style is switched off
+  function setStyle(style) {
+    if (style === P.style) return [];
+    if (style === "pressure") {
+      lsSet("ssFlowPrev", Object.fromEntries(Object.keys(PRESSURE).map(k => [k, P[k]])));
+      Object.assign(P, PRESSURE);
+    } else {
+      Object.assign(P, lsGet("ssFlowPrev", {}), { style: "flow" });
+    }
+    save();
+    engineLog(style === "pressure" ? `📊 Скальпінг тиском стакану: тейк ${P.tpPct}% лімітом, стоп ${P.slPct}%, вихід одразу, коли тиск зник, до ${P.maxPositions} угод` : "⚡⚡ Повернено звичайний суперскальпінг (стакан + стрічка)", "gold-t");
+    return [`стиль → ${style === "pressure" ? "тиск стакану" : "потік ордерів"}`];
   }
   function setOn(on) { P.on = !!on; save(); if (on) pickCoins(true); engineLog(on ? `⚡⚡ Суперскальпінг увімкнено: ${P.symbols.join(", ")} · тейк ${P.tpPct}% лімітом · стоп ${P.slPct}%` : "⚡⚡ Суперскальпінг вимкнено (відкриті угоди доведе до кінця)", on ? "up" : "mute"); }
   function stats() {
@@ -661,7 +710,7 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs }) {
       bySymbol: by(t => t.sym), bySignal: [].concat(by(t => t.sig && t.sig.ice ? "iceberg" : null), by(t => t.sig && t.sig.abs ? "absorption" : null), by(t => t.sig && t.sig.spoof ? "spoof" : null)),
       byTp: by(t => t.cfg && t.cfg.tpPct), byExit: by(t => t.how), last: ST.trades.slice(-20) };
   }
-  return { optimizeNow: () => optimizeExits(true), view, aiView, setParams, setOn, params: P, signals, _test: { M, POSN, applyBook, applyTrades, judgeMode, ST, inverted, optimizeExits, expect, feat, simulate } };
+  return { setStyle, optimizeNow: () => optimizeExits(true), view, aiView, setParams, setOn, params: P, signals, _test: { M, POSN, applyBook, applyTrades, judgeMode, ST, inverted, optimizeExits, expect, feat, simulate } };
 }
 
 module.exports = { create, DEFAULTS };
