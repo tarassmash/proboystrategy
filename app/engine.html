@@ -1,0 +1,1571 @@
+<!doctype html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Breakout Bot</title>
+<style>
+:root {
+  --bg: #0b0e11; --panel: #161a1e; --line: #2b3139; --ink: #eaecef; --mute: #848e9c;
+  --gold: #f7a600; --up: #0ecb81; --down: #f6465d;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+.mono, input, select, td, .num { font-family: ui-monospace, "SF Mono", Consolas, monospace; }
+header { position: sticky; top: 0; z-index: 5; background: rgba(22,26,30,.96); border-bottom: 1px solid var(--line); }
+.wrap { max-width: 1180px; margin: 0 auto; padding: 12px 16px; }
+.bar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: space-between; }
+h1 { margin: 0; font-size: 18px; letter-spacing: -.01em; }
+h2 { margin: 0 0 10px; font-size: 14px; }
+.sub { color: var(--mute); font-size: 12px; }
+main.wrap { display: grid; gap: 14px; padding-top: 16px; padding-bottom: 40px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 14px; }
+.grid { display: grid; gap: 10px; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); }
+label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--mute); }
+label small { color: #5e6673; }
+input, select { min-height: 40px; background: var(--bg); color: var(--ink); border: 1px solid var(--line); border-radius: 8px; padding: 0 10px; font-size: 13px; width: 100%; }
+input:focus, select:focus { outline: 2px solid rgba(247,166,0,.4); border-color: var(--gold); }
+input.bad { border-color: var(--down); }
+.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+button { min-height: 40px; padding: 0 14px; border-radius: 9px; border: 1px solid var(--line); background: transparent; color: var(--ink); font-weight: 600; cursor: pointer; font-size: 13px; }
+button:disabled { opacity: .5; cursor: default; }
+button.gold { background: var(--gold); border-color: var(--gold); color: #111; }
+button.red { border-color: rgba(246,70,93,.5); color: var(--down); }
+button.green { background: var(--up); border-color: var(--up); color: #062; }
+.pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px; border-radius: 999px; border: 1px solid var(--line); font-size: 12px; color: var(--mute); }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--line); }
+.on .dot { background: var(--up); box-shadow: 0 0 0 3px rgba(14,203,129,.2); }
+.on { color: var(--up); border-color: rgba(14,203,129,.4); }
+.up { color: var(--up); } .down { color: var(--down); } .gold-t { color: var(--gold); } .mute { color: var(--mute); }
+table { width: 100%; border-collapse: collapse; font-size: 12px; }
+th { text-align: left; color: var(--mute); font-weight: 500; padding: 6px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+td { padding: 7px 8px; border-bottom: 1px solid rgba(43,49,57,.6); white-space: nowrap; }
+.scroll { overflow-x: auto; }
+.kpis { display: grid; gap: 8px; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
+.kpi { border: 1px solid var(--line); border-radius: 10px; padding: 9px 10px; background: var(--bg); }
+.kpi b { display: block; margin-top: 3px; font-size: 16px; font-family: ui-monospace, Consolas, monospace; }
+.kpi span { font-size: 11px; color: var(--mute); }
+#log { max-height: 260px; overflow: auto; font-size: 12px; margin: 0; padding: 0; list-style: none; }
+#log li { padding: 3px 0; border-bottom: 1px solid rgba(43,49,57,.5); display: flex; gap: 10px; }
+#log time { color: var(--mute); flex: none; }
+.warn { border: 1px solid rgba(247,166,0,.4); background: rgba(247,166,0,.08); color: var(--gold); border-radius: 10px; padding: 10px 12px; font-size: 13px; }
+.err { border-color: rgba(246,70,93,.5); background: rgba(246,70,93,.08); color: var(--down); }
+.hidden { display: none !important; }
+.tabs { display: flex; gap: 6px; padding-top: 12px; padding-bottom: 0; }
+.tabs button { min-height: 42px; }
+.tabs button.act { background: var(--gold); border-color: var(--gold); color: #111; }
+.bar-mini { display: inline-block; height: 6px; border-radius: 3px; background: var(--up); vertical-align: middle; }
+details summary { cursor: pointer; color: var(--mute); font-size: 12px; }
+.tag { padding: 1px 7px; border-radius: 6px; font-size: 11px; border: 1px solid var(--line); }
+.tag.armed { color: var(--gold); border-color: rgba(247,166,0,.4); }
+.tag.long { color: var(--up); border-color: rgba(14,203,129,.4); }
+.tag.short { color: var(--down); border-color: rgba(246,70,93,.4); }
+@media (max-width: 600px) { .wrap { padding: 10px 12px; } }
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap bar">
+    <div>
+      <h1>Breakout Bot <span class="sub">· Bybit USDT-perp · Buy Stop / Sell Stop на пробій діапазону</span></h1>
+      <div class="sub" id="hdr-sub">Не підключено</div>
+    </div>
+    <div class="row">
+      <span class="pill" id="run-pill"><span class="dot"></span><span id="run-text">Зупинено</span></span>
+      <button id="btn-mode" title="Перемкнути режим: пробій діапазону ↔ ракети">🚀 Режим ракет: вимк</button>
+      <button id="btn-scalp" title="Скальпінг: тейк +0.5%, стоп −1%, короткі діапазони, частий скан">⚡ Скальпінг: вимк</button>
+      <button id="btn-auto" title="Повний автопілот: пробої + ракети, нові заявки кожен скан, сам послаблює фільтри, якщо довго нічого немає">🤖 Автопілот: вимк</button>
+      <button class="gold" id="btn-start">Запустити бота</button>
+      <button class="red" id="btn-stop">Зупинити і зняти стопи</button>
+    </div>
+  </div>
+</header>
+
+<nav class="wrap tabs">
+  <button data-tab="bot" class="act">🤖 Бот</button>
+  <button data-tab="radar">⚡ Радар на найближчу годину</button>
+</nav>
+<main class="wrap" id="tab-bot">
+  <div class="warn" id="note-open">
+    Стоп-ордери, стоп-лос і тейк-профіт стоять <b>на біржі</b> і спрацюють навіть із закритою сторінкою.
+    Але сканування нових монет, зняття протилежного ордера, беззбиток і трейлінг працюють лише поки ця сторінка відкрита.
+  </div>
+  <div class="warn err hidden" id="note-err"></div>
+
+  <section class="card">
+    <h2>Підключення Bybit</h2>
+    <div class="grid">
+      <label>API Key<input id="k-key" autocomplete="off" spellcheck="false"></label>
+      <label>API Secret<input id="k-secret" type="password" autocomplete="off" spellcheck="false"></label>
+      <label>Біржа
+        <select id="k-env"><option value="mainnet">Mainnet · реальні гроші</option><option value="testnet">Testnet · навчальний</option></select>
+      </label>
+      <label>Запам'ятати ключ<select id="k-remember"><option value="0">Ні, лише до закриття вкладки</option><option value="1">Так, у цьому браузері</option></select></label>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <button id="btn-test">Перевірити підключення</button>
+      <span class="sub" id="test-out">Ключ: права Read + Contract Trade, без Withdrawal. Ключ не виходить нікуди, крім Bybit.</span>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Стратегія пробою</h2>
+    <div class="grid" id="settings"></div>
+    <details style="margin-top:10px">
+      <summary>Як це працює</summary>
+      <div class="sub" style="margin-top:8px; line-height:1.6">
+        <b>🪜 Сітка на відкат.</b> Коли пробій спрацював і ціна пройшла ≥ заданої кількості R, бот ставить лісенку лімітних покупок
+        (для шорту — продажів) на рівнях відкату від 23.6% до заданої глибини руху, але завжди вище стопу і вище точки входу.
+        Кожна виконана покупка одразу отримує свою лімітну продаж (reduce-only) на відскоку на один крок сітки, після продажу
+        покупка ставиться знову. Так бот докуповує корекцію і заробляє на відскоках, поки ракета летить.
+        Стоп і тейк позиції діють на весь обсяг, включно з докупленим. Коли позиція закривається — вся сітка знімається.<br><br>
+        1. Кожні N хвилин бот бере найліквідніші монети і шукає <b>стиснення</b>: вузький діапазон за останні свічки, Bollinger-ширина в нижніх процентилях, ціна всередині діапазону, ринок без тренду (ER низький).<br>
+        2. Над діапазоном ставить <b>Buy Stop</b> (тригер = максимум + буфер), під ним <b>Sell Stop</b> (мінімум − буфер). Тип: стоп-ліміт або стоп-маркет.<br>
+        3. До кожного ордера одразу прив'язані <b>стоп-лос</b> і <b>тейк-профіт</b> — біржа захищає позицію сама.<br>
+        4. Коли спрацював один бік — бот знімає протилежний ордер. При +1R переносить стоп у беззбиток, далі вмикає трейлінг.<br>
+        5. Якщо пробою немає за X годин — ордери знімаються, діапазон перераховується.<br>
+        Стоп у середині діапазону: якщо пробій хибний, лонг закриється стопом раніше, ніж спрацює протилежний Sell Stop.
+      </div>
+    </details>
+  </section>
+
+  <section class="card" id="rocket-card">
+    <div class="bar">
+      <h2>🚀 Ракети — монети, що можуть різко полетіти вгору</h2>
+      <div class="row"><span class="sub" id="rocket-info">Ще не шукали</span><button class="gold" id="btn-rocket">🚀 Знайти ракети зараз</button></div>
+    </div>
+    <p class="sub" style="margin:0 0 8px">Бал 0–100 зі слідів підготовки до руху: стиснення волатильності, приплив обсягу, ріст відкритого інтересу при пласкій ціні,
+      ціна тисне на верх діапазону, сильніша за BTC, від'ємний funding (паливо для шорт-сквізу). У режимі ракет бот сам ставить
+      Buy Stop над опором на монети з балом ≥ порогу, тейк більший (за замовчуванням 4R), далі трейлінг.</p>
+    <div class="scroll"><table>
+      <thead><tr><th>Монета</th><th>Бал</th><th>Ціна</th><th>До пробою</th><th>Обсяг ×</th><th>OI 4 год</th><th>vs BTC 24г</th><th>Funding</th><th>Стиснення</th><th>Чому</th><th></th></tr></thead>
+      <tbody id="rockets"><tr><td colspan="11" class="mute">Натисніть «Знайти ракети зараз» або увімкніть режим ракет і запустіть бота</td></tr></tbody>
+    </table></div>
+  </section>
+
+  <section class="card">
+    <div class="bar"><h2>Сетапи на біржі</h2><span class="sub" id="scan-info">—</span></div>
+    <div class="sub" id="auto-info" style="color:var(--up)"></div>
+    <div class="row" style="margin:6px 0 10px">
+      <input id="now-sym" placeholder="Монета, напр. SOLUSDT" style="max-width:200px" autocomplete="off" spellcheck="false">
+      <button class="green" id="now-long">⚡ Лонг зараз</button>
+      <button class="red" id="now-short">⚡ Шорт зараз</button>
+      <span class="sub">Без очікування пробою: ліміт по ринку + сітка лімітів до стопу + стоп і тейк на біржі одразу</span>
+    </div>
+    <div class="scroll"><table>
+      <thead><tr><th>Монета</th><th>Стан</th><th>Діапазон</th><th>Buy Stop</th><th>Sell Stop</th><th>Стоп / Тейк</th><th>Ризик</th><th>Діє до</th><th></th></tr></thead>
+      <tbody id="setups"></tbody>
+    </table></div>
+  </section>
+
+  <section class="card">
+    <h2>Позиції</h2>
+    <div class="scroll"><table>
+      <thead><tr><th>Монета</th><th>Бік</th><th>Розмір</th><th>Вхід</th><th>Марк</th><th>PnL</th><th>Стоп</th><th>Тейк</th><th>Трейлінг</th><th>Ліквідація</th></tr></thead>
+      <tbody id="positions"></tbody>
+    </table></div>
+  </section>
+
+  <section class="card">
+    <div class="bar"><h2>Усі ордери на біржі</h2><span class="sub" id="ex-info">—</span></div>
+    <p class="sub">Усе, що зараз стоїть на Bybit (USDT-perp): лімітки, стоп-ордери, а також ордери, поставлені вручну чи іншими ботами. Оновлюється кожні 15 с, навіть коли бот зупинений.</p>
+    <div class="scroll"><table>
+      <thead><tr><th>Монета</th><th>Бік</th><th>Тип</th><th>Ціна / тригер</th><th>К-сть</th><th>Reduce</th><th>Чий</th><th>Поставлено</th></tr></thead>
+      <tbody id="ex-orders"></tbody>
+    </table></div>
+  </section>
+
+  <section class="card">
+    <h2>Перенесення між браузером і сервером</h2>
+    <p class="sub">Сетапи, журнал і налаштування зберігаються там, де бот запущено. Щоб сервер (Railway) супроводжував сетапи, поставлені з браузера (Netlify чи файл):
+      1) на старій сторінці натисніть «Експорт» і скопіюйте текст; 2) закрийте стару сторінку — НЕ натискайте там «Зупинити», бо це зніме ордери; 3) тут вставте текст і натисніть «Імпорт». Ключі не переносяться.</p>
+    <div class="row" style="margin-top:8px"><button id="btn-export">Експорт</button><button id="btn-import" class="green">Імпорт</button><span class="sub" id="xfer-out"></span></div>
+    <textarea id="xfer" rows="4" style="width:100%;margin-top:8px;font:12px monospace" placeholder="Сюди вставте текст експорту" spellcheck="false"></textarea>
+  </section>
+
+  <section class="card">
+    <div class="bar"><h2>Статистика угод</h2><div class="row"><button id="btn-csv">CSV</button><button id="btn-clear-j">Очистити журнал</button></div></div>
+    <div class="kpis" id="kpis"></div>
+    <div class="scroll" style="margin-top:10px"><table>
+      <thead><tr><th>Закрито</th><th>Монета</th><th>Бік</th><th>Вхід</th><th>Вихід</th><th>Причина</th><th>R</th><th>PnL</th><th>Тривалість</th><th>Діапазон / стиснення</th></tr></thead>
+      <tbody id="journal"></tbody>
+    </table></div>
+  </section>
+
+  <section class="card">
+    <h2>Журнал дій</h2>
+    <ul id="log"></ul>
+  </section>
+</main>
+
+<main class="wrap hidden" id="tab-radar">
+  <div class="warn">
+    Секретних даних про майбутні пампи не існує. Радар шукає монети, де рух <b>уже починається</b> — за живими публічними даними Bybit:
+    сплеск обсягу на 5-хвилинках, стрибок відкритого інтересу, перекіс стакану, багато шортів, від'ємний funding, свіжі анонси Bybit.
+    Через годину радар сам перевіряє, чи монета справді виросла, — ця статистика покаже, чи працює радар.
+  </div>
+  <section class="card">
+    <div class="bar">
+      <h2>⚡ Монети з ознаками рвучкого руху</h2>
+      <div class="row">
+        <span class="sub" id="radar-info">Ще не сканували</span>
+        <button id="radar-auto">Авто-оновлення: вимк</button>
+        <button id="radar-place">Авто-ставити: вимк</button>
+        <button class="gold" id="radar-run">⚡ Сканувати зараз</button>
+      </div>
+    </div>
+    <div class="grid" id="radar-settings" style="margin:10px 0"></div>
+    <div class="scroll"><table>
+      <thead><tr><th>Монета</th><th>Бал</th><th>Ціна</th><th>15 хв</th><th>Обсяг ×</th><th>OI 15 хв</th><th>Стакан B/A</th><th>Шорти</th><th>Funding</th><th>Анонс</th><th>Чому</th><th></th></tr></thead>
+      <tbody id="radar"><tr><td colspan="12" class="mute">Натисніть «Сканувати зараз»</td></tr></tbody>
+    </table></div>
+  </section>
+  <section class="card">
+    <div class="bar"><h2>Перевірка через годину: чи виріс сигнал</h2><div class="row"><button id="radar-csv">CSV</button><button id="radar-clear">Очистити</button></div></div>
+    <p class="sub" style="margin:0 0 8px">Кожна монета з балом ≥ порогу записується. Через 60 хв радар бере 1-хвилинні свічки цієї години:
+      «макс» — найвищий ріст від ціни сигналу, «через 1 год» — де ціна була в кінці. Влучання = макс ≥ +3%.</p>
+    <div class="kpis" id="radar-kpis"></div>
+    <div class="scroll" style="margin-top:10px"><table>
+      <thead><tr><th>Сигнал</th><th>Монета</th><th>Бал</th><th>Ціна</th><th>Макс за год</th><th>Мін за год</th><th>Через 1 год</th><th>Результат</th><th>Чому</th></tr></thead>
+      <tbody id="radar-log"></tbody>
+    </table></div>
+  </section>
+</main>
+
+<script>
+"use strict";
+// ------------------------------------------------------------------ settings
+const FIELDS = [
+  ["rocketScore", "🚀 Мін. бал ракети", 55, 10, 100, false, "вище = менше, але сильніших"],
+  ["rocketTpR", "🚀 Тейк ракети, R", 4, 1, 30, false, "ракети ловлять великий рух"],
+  ["rocketSides", "🚀 Ракети: сторони", "long", null, null, null, "long|both"],
+  ["rocketCoins", "🚀 Скільки монет сканувати", 150, 10, 600, true, "включно з дрібними"],
+  ["rocketTurnover", "🚀 Мін. обіг 24 год, млн $", 5, 0, 100000, false, "дрібні монети летять сильніше"],
+  ["nowSlip", "⚡ Вхід зараз: ліміт від ціни, %", 0.05, 0, 2, false, "наскільки гірше за best ask/bid"],
+  ["nowLadder", "⚡ Вхід зараз: лімітки сітки", 4, 0, 10, true, "0 — без сітки"],
+  ["nowLadderDepth", "⚡ Сітка до стопу, %", 70, 20, 95, false, "як глибоко до стопу ставити лімітки"],
+  ["nowWaitMin", "⚡ Чекати виконання входу, хв", 15, 1, 240, true, "далі вхід і сітка знімаються"],
+  ["dipMode", "🪜 Сітка на відкат", "rocket", null, null, null, "off|rocket|all"],
+  ["dipLevels", "🪜 Рівнів сітки", 4, 1, 10, true, "лімітки на відкаті після пробою"],
+  ["dipSize", "🪜 Розмір рівня, % позиції", 50, 5, 200, false, "від початкової кількості"],
+  ["dipDepth", "🪜 Глибина відкату, % руху", 61.8, 25, 100, false, "рівні від 23.6% до цієї глибини"],
+  ["dipStartR", "🪜 Ставити сітку після, R", 1, 0, 10, false, "коли ціна вже відійшла від входу"],
+  ["margin", "Маржа на угоду, USDT", 5, 1, 100000, false, "скільки своїх грошей у позиції"],
+  ["leverage", "Плече", 10, 1, 100, true, "не вище максимуму монети"],
+  ["maxSetups", "Макс. сетапів одночасно", 4, 1, 30, true, "пари Buy/Sell Stop + відкриті позиції"],
+  ["coins", "Скільки монет сканувати", 60, 5, 300, true, "найліквідніші за обігом"],
+  ["minTurnover", "Мін. обіг 24 год, млн $", 20, 0, 100000, false, ""],
+  ["tf", "Таймфрейм, хв", 15, 1, 240, true, "1, 3, 5, 15, 30, 60, 120, 240"],
+  ["lookback", "Свічок у діапазоні", 32, 8, 200, true, "15 хв × 32 = 8 год"],
+  ["minWidth", "Мін. ширина діапазону, %", 0.8, 0.1, 50, false, "вужче — з'їдять комісії"],
+  ["maxWidth", "Макс. ширина діапазону, %", 4, 0.2, 50, false, "ширше — це не стиснення"],
+  ["squeeze", "Стиснення BB, процентиль ≤", 25, 1, 100, false, "менше = сильніше стиснення"],
+  ["maxEr", "Макс. ER (трендовість)", 0.35, 0.05, 1, false, "0 — пила, 1 — пряма лінія"],
+  ["buffer", "Буфер пробою, %", 0.15, 0, 5, false, "відступ тригера від межі"],
+  ["slip", "Ліміт від тригера, %", 0.15, 0, 5, false, "для стоп-ліміту"],
+  ["slMode", "Стоп-лос", "mid", null, null, null, "mid|edge|atr|pct"],
+  ["slPct", "Стоп-лос, % від входу", 1, 0.1, 20, false, "коли стоп «% від входу»"],
+  ["tpPct", "Тейк, % від входу", 0, 0, 50, false, "0 — тейк у R; >0 — фіксований % (скальпінг)"],
+  ["atrK", "ATR × для стопу", 1.5, 0.3, 10, false, "якщо стоп за ATR"],
+  ["tpR", "Тейк-профіт, R", 2.5, 0.5, 20, false, "R = відстань до стопу"],
+  ["beR", "Беззбиток при, R", 1, 0, 10, false, "0 — вимкнено"],
+  ["trailR", "Трейлінг від, R", 1.5, 0, 20, false, "0 — вимкнено"],
+  ["trailDist", "Відстань трейлінгу, R", 1, 0.2, 10, false, ""],
+  ["expiryH", "Чекати пробій, год", 6, 0.5, 72, false, "далі ордери знімаються"],
+  ["cooldownMin", "Пауза по монеті, хв", 120, 0, 10080, true, "після угоди або закінчення"],
+  ["scanMin", "Скан кожні, хв", 5, 1, 120, true, ""],
+  ["orderType", "Тип ордера", "Limit", null, null, null, "Limit|Market"],
+  ["triggerBy", "Тригер за ціною", "LastPrice", null, null, null, "LastPrice|MarkPrice"],
+];
+const SELECTS = {
+  dipMode: [["rocket", "Лише для ракет"], ["all", "Для всіх пробоїв"], ["off", "Вимкнено"]],
+  rocketSides: [["long", "Лише лонг (вгору)"], ["both", "Обидва боки"]],
+  slMode: [["mid", "Середина діапазону"], ["edge", "Протилежна межа"], ["atr", "Від тригера × ATR"], ["pct", "% від входу"]],
+  orderType: [["Limit", "Стоп-ліміт"], ["Market", "Стоп-маркет"]],
+  triggerBy: [["LastPrice", "Остання ціна"], ["MarkPrice", "Марк-ціна"]],
+};
+const LS = {
+  get(k, d) { try { const v = localStorage.getItem("bx." + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
+  set(k, v) { try { localStorage.setItem("bx." + k, JSON.stringify(v)); } catch {} },
+  del(k) { try { localStorage.removeItem("bx." + k); } catch {} },
+};
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+let CFG = Object.assign(Object.fromEntries(FIELDS.map(f => [f[0], f[2]])), LS.get("settings", {}));
+let SETUPS = LS.get("setups", []);      // {symbol, state: armed|long|short, ...}
+let JOURNAL = LS.get("journal", []);
+let COOL = LS.get("cool", {});
+let RUN = LS.get("running", false);
+let POS = [];
+let SPEC = {};
+let OFFSET = 0;
+let busy = false, lastScan = 0;
+let ROCKETS = [];
+if (!CFG.mode) CFG.mode = "breakout";
+
+function parseNum(raw) {
+  const t = String(raw ?? "").trim().replace(/[\s ]/g, "").replace(",", ".");
+  return /^(\d+\.?\d*|\.\d+)$/.test(t) ? Number(t) : NaN;
+}
+function buildSettings() {
+  $("settings").innerHTML = FIELDS.map(([k, name, , lo, hi, , hint]) => {
+    if (SELECTS[k]) return `<label>${name}<select data-k="${k}">${SELECTS[k].map(([v, t]) => `<option value="${v}" ${CFG[k] === v ? "selected" : ""}>${t}</option>`).join("")}</select>${hint && !hint.includes("|") ? `<small>${hint}</small>` : ""}</label>`;
+    return `<label>${name}<input data-k="${k}" inputmode="decimal" value="${esc(CFG[k])}"><small>${esc(hint)}${hint ? " · " : ""}${lo}–${hi}</small></label>`;
+  }).join("");
+  $("settings").querySelectorAll("[data-k]").forEach(el => el.addEventListener("change", () => {
+    const f = FIELDS.find(x => x[0] === el.dataset.k);
+    if (SELECTS[f[0]]) { CFG[f[0]] = el.value; LS.set("settings", CFG); return; }
+    const v = parseNum(el.value);
+    const ok = Number.isFinite(v) && v >= f[3] && v <= f[4] && (!f[5] || Number.isInteger(v));
+    el.classList.toggle("bad", !ok);
+    if (!ok) { log(`${f[1]}: від ${f[3]} до ${f[4]}${f[5] ? ", ціле" : ""}`, "down"); el.value = CFG[f[0]]; el.classList.remove("bad"); return; }
+    CFG[f[0]] = v; LS.set("settings", CFG);
+  }));
+}
+
+// ------------------------------------------------------------------ radar settings
+const RFIELDS = [
+  ["radarScore", "Поріг балу", 60, 10, 100, false, "з нього сигнал пишеться в перевірку"],
+  ["radarCoins", "Скільки монет", 150, 10, 600, true, "найліквідніші за обігом"],
+  ["radarTurnover", "Мін. обіг 24 год, млн $", 5, 0, 100000, false, ""],
+  ["radarEvery", "Авто-оновлення кожні, хв", 5, 1, 60, true, ""],
+  ["radarTpR", "Тейк для «Поставити», R", 3, 1, 30, false, "стоп — середина останньої години"],
+];
+for (const f of RFIELDS) if (CFG[f[0]] === undefined) CFG[f[0]] = f[2];
+function buildRadarSettings() {
+  $("radar-settings").innerHTML = RFIELDS.map(([k, name, , lo, hi, , hint]) =>
+    `<label>${name}<input data-rk="${k}" inputmode="decimal" value="${esc(CFG[k])}"><small>${esc(hint)}${hint ? " · " : ""}${lo}–${hi}</small></label>`).join("");
+  $("radar-settings").querySelectorAll("[data-rk]").forEach(el => el.addEventListener("change", () => {
+    const f = RFIELDS.find(x => x[0] === el.dataset.rk);
+    const v = parseNum(el.value);
+    if (!(Number.isFinite(v) && v >= f[3] && v <= f[4] && (!f[5] || Number.isInteger(v)))) {
+      log(`${f[1]}: від ${f[3]} до ${f[4]}${f[5] ? ", ціле" : ""}`, "down"); el.value = CFG[f[0]]; return;
+    }
+    CFG[f[0]] = v; LS.set("settings", CFG);
+  }));
+}
+
+// ------------------------------------------------------------------ log
+function log(text, cls = "") {
+  const li = document.createElement("li");
+  li.innerHTML = `<time>${new Date().toLocaleTimeString()}</time><span class="${cls}">${esc(text)}</span>`;
+  $("log").prepend(li);
+  while ($("log").children.length > 300) $("log").lastChild.remove();
+}
+function showErr(text) { $("note-err").textContent = text; $("note-err").classList.toggle("hidden", !text); }
+
+// ------------------------------------------------------------------ Bybit
+function host() { return $("k-env").value === "testnet" ? "https://api-testnet.bybit.com" : "https://api.bybit.com"; }
+async function hmac(secret, msg) {
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(msg));
+  return [...new Uint8Array(sig)].map(b => b.toString(16).padStart(2, "0")).join("");
+}
+class BybitErr extends Error { constructor(msg, code) { super(msg); this.code = code; } }
+async function bx(path, { method = "GET", query = null, body = null, auth = false } = {}, retry = true) {
+  const qs = query ? new URLSearchParams(Object.entries(query).filter(([, v]) => v !== undefined && v !== null).map(([k, v]) => [k, String(v)])).toString() : "";
+  const bodyStr = method === "POST" ? JSON.stringify(body || {}) : "";
+  const headers = {};
+  if (method === "POST") headers["Content-Type"] = "application/json";
+  if (auth) {
+    const key = $("k-key").value.trim(), secret = $("k-secret").value.trim();
+    if (!key || !secret) throw new BybitErr("Введіть API Key і Secret");
+    const ts = String(Date.now() + OFFSET), recv = "10000";
+    headers["X-BAPI-API-KEY"] = key;
+    headers["X-BAPI-TIMESTAMP"] = ts;
+    headers["X-BAPI-RECV-WINDOW"] = recv;
+    headers["X-BAPI-SIGN"] = await hmac(secret, ts + key + recv + (method === "GET" ? qs : bodyStr));
+  }
+  let res;
+  try {
+    res = await fetch(host() + path + (qs ? "?" + qs : ""), { method, headers, body: method === "POST" ? bodyStr : undefined });
+  } catch (e) {
+    throw new BybitErr(auth
+      ? "Браузер не дав надіслати підписаний запит до Bybit (CORS або мережа). Відкрийте файл у Chrome/Edge; якщо не допоможе — потрібен локальний проксі."
+      : "Немає зв'язку з Bybit: " + e.message);
+  }
+  const json = await res.json().catch(() => ({}));
+  if ((res.status === 403 || res.status === 451) && json.retCode === undefined) {
+    // Bybit (CloudFront) refuses the whole country of this server or browser
+    throw new BybitErr("HTTP " + res.status + ": Bybit блокує країну, з якої йде запит. На Railway: сервіс → Settings → Region → Europe West (Amsterdam) або Southeast Asia (Singapore), не US. У браузері — вимкніть VPN США.", 403);
+  }
+  if (json.retCode === 10002 && retry) { await syncTime(); return bx(path, { method, query, body, auth }, false); }
+  if (json.retCode !== 0) throw new BybitErr((json.retMsg || ("HTTP " + res.status)) + (json.retCode ? ` (${json.retCode})` : ""), json.retCode);
+  return json.result || {};
+}
+async function syncTime() {
+  try { const r = await bx("/v5/market/time"); OFFSET = Math.round(Number(r.timeNano) / 1e6) - Date.now(); } catch {}
+}
+function dec(step) { const s = String(step); return s.includes(".") ? s.split(".")[1].length : 0; }
+function align(v, step, up) {
+  const d = dec(step), f = 10 ** d, st = Math.max(1, Math.round(Number(step) * f));
+  const n = up ? Math.ceil(Math.ceil(v * f - 1e-6) / st) * st : Math.floor(Math.floor(v * f + 1e-6) / st) * st;
+  return (n / f).toFixed(d);
+}
+async function spec(symbol) {
+  if (SPEC[symbol]) return SPEC[symbol];
+  const r = await bx("/v5/market/instruments-info", { query: { category: "linear", symbol } });
+  const row = (r.list || [])[0];
+  if (!row) throw new BybitErr("Немає " + symbol);
+  return SPEC[symbol] = {
+    tick: row.priceFilter.tickSize, step: row.lotSizeFilter.qtyStep,
+    minQty: Number(row.lotSizeFilter.minOrderQty || 0), minNotional: Number(row.lotSizeFilter.minNotionalValue || 5),
+    maxLev: Number((row.leverageFilter || {}).maxLeverage || 10),
+  };
+}
+async function candles(symbol, limit) {
+  const r = await bx("/v5/market/kline", { query: { category: "linear", symbol, interval: String(CFG.tf), limit: String(limit) } });
+  return (r.list || []).slice().reverse().map(k => ({ t: +k[0], o: +k[1], h: +k[2], l: +k[3], c: +k[4], v: +(k[6] ?? k[5] ?? 0) }));
+}
+
+// ------------------------------------------------------------------ analysis
+function atr(rows, n = 14) {
+  if (rows.length < n + 1) return 0;
+  let s = 0;
+  for (let i = rows.length - n; i < rows.length; i++) {
+    const r = rows[i], p = rows[i - 1].c;
+    s += Math.max(r.h - r.l, Math.abs(r.h - p), Math.abs(r.l - p));
+  }
+  return s / n;
+}
+function bbWidths(closes, n = 20) {
+  const out = [];
+  for (let i = n; i <= closes.length; i++) {
+    const w = closes.slice(i - n, i), m = w.reduce((a, b) => a + b, 0) / n;
+    const sd = Math.sqrt(w.reduce((a, b) => a + (b - m) ** 2, 0) / n);
+    out.push(m ? (4 * sd) / m : 0);
+  }
+  return out;
+}
+function er(closes) {
+  if (closes.length < 2) return 1;
+  let path = 0;
+  for (let i = 1; i < closes.length; i++) path += Math.abs(closes[i] - closes[i - 1]);
+  return path ? Math.abs(closes[closes.length - 1] - closes[0]) / path : 0;
+}
+function analyse(symbol, rows, last) {
+  const closed = rows.slice(0, -1);              // ignore the candle still forming
+  const box = closed.slice(-CFG.lookback);
+  if (box.length < CFG.lookback || closed.length < 60) return { symbol, ok: false, why: "мало свічок" };
+  const hi = Math.max(...box.map(r => r.h)), lo = Math.min(...box.map(r => r.l)), mid = (hi + lo) / 2;
+  const width = (hi - lo) / mid * 100;
+  const widths = bbWidths(closed.map(r => r.c));
+  const cur = widths[widths.length - 1];
+  const hist = widths.slice(-120);
+  const pct = hist.filter(w => w <= cur).length / hist.length * 100;
+  const pos = (last - lo) / (hi - lo || 1);
+  const e = er(box.map(r => r.c));
+  const a = atr(closed);
+  const why = [];
+  if (width < CFG.minWidth) why.push(`ширина ${width.toFixed(2)}% < ${CFG.minWidth}`);
+  if (width > CFG.maxWidth) why.push(`ширина ${width.toFixed(2)}% > ${CFG.maxWidth}`);
+  if (pct > CFG.squeeze) why.push(`стиснення ${pct.toFixed(0)} > ${CFG.squeeze}`);
+  if (e > CFG.maxEr) why.push(`ER ${e.toFixed(2)} > ${CFG.maxEr}`);
+  if (pos < 0.15 || pos > 0.85) why.push("ціна біля межі");
+  return { symbol, ok: !why.length, why: why.join(", "), hi, lo, mid, width, squeeze: pct, er: e, atr: a, last, pos };
+}
+
+// ------------------------------------------------------------------ orders
+function linkId(symbol, side) { return ("bx" + symbol.slice(0, 12) + (side === "Buy" ? "B" : "S") + Date.now().toString(36)).slice(0, 36); }
+async function createOrder(body) {
+  try { return await bx("/v5/order/create", { method: "POST", body: { ...body, positionIdx: 0 }, auth: true }); }
+  catch (e) {
+    if (!/position idx/i.test(e.message)) throw e;
+    return bx("/v5/order/create", { method: "POST", body: { ...body, positionIdx: body.side === "Buy" ? 1 : 2 }, auth: true });
+  }
+}
+async function cancelLink(symbol, id) {
+  if (!id) return;
+  try { await bx("/v5/order/cancel", { method: "POST", body: { category: "linear", symbol, orderLinkId: id }, auth: true }); }
+  catch (e) { if (!/not exist|too late|order not|already/i.test(e.message)) throw e; }
+}
+function bracket(a, sp, side, tpR = CFG.tpR) {
+  const buf = CFG.buffer / 100, slip = CFG.slip / 100;
+  const long = side === "Buy";
+  const trig = long ? a.hi * (1 + buf) : a.lo * (1 - buf);
+  let sl;
+  if (CFG.slMode === "mid") sl = a.mid;
+  else if (CFG.slMode === "edge") sl = long ? a.lo : a.hi;
+  else if (CFG.slMode === "pct") sl = long ? trig * (1 - CFG.slPct / 100) : trig * (1 + CFG.slPct / 100);
+  else sl = long ? trig - CFG.atrK * a.atr : trig + CFG.atrK * a.atr;
+  const risk = Math.abs(trig - sl);
+  // fixed % take (scalping) or a multiple of the risk
+  const tp = CFG.tpPct > 0 ? (long ? trig * (1 + CFG.tpPct / 100) : trig * (1 - CFG.tpPct / 100)) : (long ? trig + tpR * risk : trig - tpR * risk);
+  return {
+    side, trigger: align(trig, sp.tick, long), limit: align(long ? trig * (1 + slip) : trig * (1 - slip), sp.tick, long),
+    sl: align(sl, sp.tick, !long), tp: align(tp, sp.tick, long), risk, riskPct: risk / trig * 100,
+  };
+}
+async function arm(a, opts = {}) {
+  const sp = await spec(a.symbol);
+  const lev = Math.min(CFG.leverage, Math.floor(sp.maxLev));
+  const sides = opts.sides || ["Buy", "Sell"];
+  const legs = sides.map(side => bracket(a, sp, side, opts.tpR || CFG.tpR));
+  const liqGuard = 80 / lev; // stop must sit well before liquidation
+  if (legs.some(l => l.riskPct >= liqGuard)) return `${a.symbol}: стоп ${legs[0].riskPct.toFixed(2)}% далі, ніж безпечно для x${lev} (${liqGuard.toFixed(2)}%). Пропуск`;
+  const notional = CFG.margin * lev;
+  const qty = align(notional / a.last, sp.step, false);
+  if (Number(qty) < sp.minQty || Number(qty) * a.last < sp.minNotional) return `${a.symbol}: ${CFG.margin} USDT × x${lev} замало (мін. ${sp.minNotional} USDT на ордер)`;
+  try { await bx("/v5/position/set-leverage", { method: "POST", body: { category: "linear", symbol: a.symbol, buyLeverage: String(lev), sellLeverage: String(lev) }, auth: true }); }
+  catch (e) { if (e.code !== 110043 && !/not modified/i.test(e.message)) throw e; }
+  const placed = [];
+  for (const l of legs) {
+    const id = linkId(a.symbol, l.side);
+    const body = {
+      category: "linear", symbol: a.symbol, side: l.side, orderType: CFG.orderType, qty,
+      triggerPrice: l.trigger, triggerDirection: l.side === "Buy" ? 1 : 2, triggerBy: CFG.triggerBy,
+      timeInForce: CFG.orderType === "Market" ? "IOC" : "GTC", orderLinkId: id, reduceOnly: false,
+      stopLoss: l.sl, takeProfit: l.tp, tpslMode: "Full", slTriggerBy: "MarkPrice", tpTriggerBy: "LastPrice",
+    };
+    if (CFG.orderType === "Limit") body.price = l.limit;
+    try { await createOrder(body); placed.push({ ...l, id }); }
+    catch (e) { for (const p of placed) await cancelLink(a.symbol, p.id); throw e; }
+  }
+  const now = Date.now();
+  SETUPS.push({
+    symbol: a.symbol, state: "armed", createdAt: now, expiresAt: now + CFG.expiryH * 3600e3, qty, lev,
+    hi: align(a.hi, sp.tick, true), lo: align(a.lo, sp.tick, false), mid: align(a.mid, sp.tick, false), width: a.width, squeeze: a.squeeze, er: a.er, atr: a.atr,
+    buy: placed.find(p => p.side === "Buy"), sell: placed.find(p => p.side === "Sell"),
+    kind: opts.kind || "breakout", score: a.score ?? null, reasons: a.reasons || [],
+  });
+  saveSetups();
+  const b = placed.find(p => p.side === "Buy"), se = placed.find(p => p.side === "Sell");
+  return `${opts.kind === "rocket" ? "🚀 " : ""}${a.symbol}: діапазон ${align(a.lo, sp.tick, false)}–${align(a.hi, sp.tick, true)} (${a.width.toFixed(2)}%, стиснення ${a.squeeze.toFixed(0)})`
+    + (b ? `, Buy Stop ${b.trigger}` : "") + (se ? `, Sell Stop ${se.trigger}` : "")
+    + `, тейк ${(b || se).tp}, x${lev}, qty ${qty}` + (a.score != null ? `, бал ${a.score}` : "");
+}
+function saveSetups() { LS.set("setups", SETUPS); }
+const legsOf = (s) => [s.buy, s.sell].filter(Boolean);
+async function cancelAll(s) { for (const l of legsOf(s)) await cancelLink(s.symbol, l.id); }
+
+// ------------------------------------------------------------------ scan
+async function scan() {
+  const free = CFG.maxSetups - SETUPS.length;
+  $("scan-info").textContent = `Скан ${new Date().toLocaleTimeString()} · вільних слотів ${Math.max(0, free)}`;
+  if (free <= 0) return;
+  const tick = await bx("/v5/market/tickers", { query: { category: "linear" } });
+  const busySyms = new Set([...SETUPS.map(s => s.symbol), ...POS.map(p => p.symbol)]);
+  const list = (tick.list || [])
+    .filter(t => t.symbol.endsWith("USDT") && Number(t.turnover24h) >= CFG.minTurnover * 1e6 && Number(t.lastPrice) > 0)
+    .sort((a, b) => Number(b.turnover24h) - Number(a.turnover24h))
+    .slice(0, CFG.coins)
+    .filter(t => !busySyms.has(t.symbol) && !((COOL[t.symbol] || 0) > Date.now()));
+  const found = [];
+  for (const t of list) {
+    if (!RUN) return;
+    try {
+      const rows = await candles(t.symbol, 200);
+      const a = analyse(t.symbol, rows, Number(t.lastPrice));
+      if (a.ok) found.push(a);
+    } catch (e) { /* skip one symbol */ }
+  }
+  found.sort((a, b) => a.squeeze - b.squeeze || a.er - b.er);
+  $("scan-info").textContent = `Скан ${new Date().toLocaleTimeString()} · перевірено ${list.length} · у стисненні ${found.length} · вільних слотів ${free}`;
+  let room = free;
+  for (const a of found) {
+    if (room <= 0 || !RUN) break;
+    try { const msg = await arm(a); log(msg, msg.includes("Пропуск") || msg.includes("замало") ? "mute" : "gold-t"); if (!msg.includes("Пропуск") && !msg.includes("замало")) room--; }
+    catch (e) {
+      log(`${a.symbol}: ${e.message}`, "down");
+      if (/insufficient|not enough|ab not enough/i.test(e.message)) { log("Недостатньо коштів — нові сетапи на паузі до наступного скану", "down"); break; }
+    }
+  }
+}
+
+// ------------------------------------------------------------------ rockets
+async function oiChange(symbol) {
+  const r = await bx("/v5/market/open-interest", { query: { category: "linear", symbol, intervalTime: "15min", limit: "20" } });
+  const l = r.list || [];                                   // newest first
+  if (l.length < 17) return 0;
+  const now = Number(l[0].openInterest), then = Number(l[16].openInterest);
+  return then ? (now / then - 1) * 100 : 0;
+}
+function rocketScore(a, rows, t, btc24, oi) {
+  const closed = rows.slice(0, -1);
+  const recent = closed.slice(-4), base = closed.slice(-44, -4);
+  const avg = (x) => x.reduce((s, r) => s + r.v, 0) / (x.length || 1);
+  const volX = avg(base) ? avg(recent) / avg(base) : 1;
+  const ch24 = Number(t.price24hPcnt || 0) * 100;
+  const rs = ch24 - btc24;
+  const toHigh = (Number(t.highPrice24h) / a.last - 1) * 100;
+  const toBreak = (a.hi / a.last - 1) * 100;
+  const fund = Number(t.fundingRate || 0) * 100;
+  let score = 0; const why = [];
+  if (a.squeeze <= 10) { score += 25; why.push(`сильне стиснення (${a.squeeze.toFixed(0)})`); }
+  else if (a.squeeze <= 20) { score += 18; why.push(`стиснення ${a.squeeze.toFixed(0)}`); }
+  else if (a.squeeze <= 35) { score += 10; why.push(`помірне стиснення ${a.squeeze.toFixed(0)}`); }
+  if (volX >= 3) { score += 20; why.push(`обсяг ×${volX.toFixed(1)}`); }
+  else if (volX >= 2) { score += 14; why.push(`обсяг ×${volX.toFixed(1)}`); }
+  else if (volX >= 1.5) { score += 8; why.push(`обсяг росте ×${volX.toFixed(1)}`); }
+  if (oi >= 15) { score += 20; why.push(`OI +${oi.toFixed(1)}% за 4 год`); }
+  else if (oi >= 8) { score += 14; why.push(`OI +${oi.toFixed(1)}%`); }
+  else if (oi >= 4) { score += 8; why.push(`OI +${oi.toFixed(1)}%`); }
+  if (a.pos >= 0.6) { score += 10; why.push("тисне на верх діапазону"); }
+  if (rs >= 5) { score += 10; why.push(`сильніша за BTC на ${rs.toFixed(1)}%`); }
+  else if (rs >= 2) { score += 6; why.push(`сильніша за BTC на ${rs.toFixed(1)}%`); }
+  if (toHigh >= 0 && toHigh <= 2) { score += 8; why.push("біля максимуму 24 год"); }
+  if (fund < 0) { score += 7; why.push(`funding ${fund.toFixed(3)}% (шорти платять)`); }
+  if (fund > 0.05) { score -= 10; why.push(`funding ${fund.toFixed(3)}% — лонги перегріті`); }
+  if (a.er > 0.6) { score -= 10; why.push("вже в сильному русі"); }
+  return { ...a, score: Math.max(0, Math.min(100, Math.round(score))), reasons: why, volX, oi, rs, fund, toBreak, ch24 };
+}
+async function scanRocket(place) {
+  $("btn-rocket").disabled = true;
+  $("rocket-info").textContent = "Шукаю…";
+  try {
+    const tick = await bx("/v5/market/tickers", { query: { category: "linear" } });
+    const all = tick.list || [];
+    const btc = all.find(t => t.symbol === "BTCUSDT");
+    const btc24 = btc ? Number(btc.price24hPcnt) * 100 : 0;
+    const busySyms = new Set([...SETUPS.map(s => s.symbol), ...POS.map(p => p.symbol)]);
+    const list = all
+      .filter(t => t.symbol.endsWith("USDT") && Number(t.turnover24h) >= CFG.rocketTurnover * 1e6 && Number(t.lastPrice) > 0)
+      .sort((a, b) => Number(b.turnover24h) - Number(a.turnover24h))
+      .slice(0, CFG.rocketCoins);
+    const pre = [];
+    let i = 0;
+    for (const t of list) {
+      if (++i % 10 === 0) $("rocket-info").textContent = `Шукаю… ${i}/${list.length}`;
+      try {
+        const rows = await candles(t.symbol, 200);
+        const a = analyse(t.symbol, rows, Number(t.lastPrice));
+        if (!a.hi || a.pos > 0.97 || a.pos < 0.3) continue;    // already broke out, or near the floor
+        if (a.width < CFG.minWidth || a.width > CFG.maxWidth * 1.5) continue;
+        pre.push({ a, rows, t, quick: rocketScore(a, rows, t, btc24, 0).score });
+      } catch (e) { /* skip */ }
+    }
+    pre.sort((x, y) => y.quick - x.quick);
+    const out = [];
+    for (const p of pre.slice(0, 30)) {                      // open interest only for the best 30
+      let oi = 0;
+      try { oi = await oiChange(p.t.symbol); } catch (e) { /* no OI */ }
+      out.push(rocketScore(p.a, p.rows, p.t, btc24, oi));
+    }
+    out.sort((x, y) => y.score - x.score);
+    ROCKETS = out.slice(0, 25);
+    const hot = ROCKETS.filter(r => r.score >= CFG.rocketScore);
+    $("rocket-info").textContent = `${new Date().toLocaleTimeString()} · перевірено ${list.length} · кандидатів ${out.length} · бал ≥ ${CFG.rocketScore}: ${hot.length}`;
+    renderRockets();
+    if (!place) return;
+    let room = CFG.maxSetups - SETUPS.length;
+    for (const r of hot) {
+      if (room <= 0 || !RUN) break;
+      if (busySyms.has(r.symbol) || (COOL[r.symbol] || 0) > Date.now()) continue;
+      try {
+        const msg = await arm(r, { kind: "rocket", tpR: CFG.rocketTpR, sides: CFG.rocketSides === "both" ? ["Buy", "Sell"] : ["Buy"] });
+        const skip = /Пропуск|замало/.test(msg);
+        log(msg + (skip ? "" : ` · чому: ${r.reasons.join(", ")}`), skip ? "mute" : "gold-t");
+        if (!skip) room--;
+      } catch (e) {
+        log(`${r.symbol}: ${e.message}`, "down");
+        if (/insufficient|not enough|ab not enough/i.test(e.message)) { log("Недостатньо коштів — ракети на паузі до наступного скану", "down"); break; }
+      }
+    }
+  } catch (e) { $("rocket-info").textContent = "Помилка: " + e.message; log(e.message, "down"); }
+  finally { $("btn-rocket").disabled = false; render(); }
+}
+function renderRockets() {
+  $("rockets").innerHTML = ROCKETS.length ? ROCKETS.map((r, i) => {
+    const hot = r.score >= CFG.rocketScore;
+    const armed = SETUPS.some(s => s.symbol === r.symbol);
+    return `<tr><td><b>${esc(r.symbol)}</b></td>
+      <td><b class="${hot ? "up" : "mute"}">${r.score}</b></td><td>${r.last}</td>
+      <td>${r.toBreak >= 0 ? "+" : ""}${r.toBreak.toFixed(2)}%</td><td class="${r.volX >= 2 ? "up" : ""}">×${r.volX.toFixed(1)}</td>
+      <td class="${r.oi >= 8 ? "up" : r.oi < 0 ? "down" : ""}">${r.oi >= 0 ? "+" : ""}${r.oi.toFixed(1)}%</td>
+      <td class="${r.rs >= 0 ? "up" : "down"}">${r.rs >= 0 ? "+" : ""}${r.rs.toFixed(1)}%</td>
+      <td class="${r.fund < 0 ? "up" : r.fund > 0.05 ? "down" : ""}">${r.fund.toFixed(3)}%</td><td>${r.squeeze.toFixed(0)}</td>
+      <td style="white-space:normal;min-width:220px" class="mute">${esc(r.reasons.join(" · ") || "—")}</td>
+      <td style="white-space:nowrap">${armed ? `<span class="tag armed">стоїть</span>` : `<button data-rocket="${i}" style="min-height:30px">Поставити</button> <button data-rnow="${i}" class="green" style="min-height:30px" title="без очікування пробою">⚡ Зайти зараз</button>`}</td></tr>`;
+  }).join("") : `<tr><td colspan="11" class="mute">Підходящих монет зараз немає</td></tr>`;
+  $("rockets").querySelectorAll("[data-rnow]").forEach(b => b.onclick = () => {
+    const r = ROCKETS[Number(b.dataset.rnow)];
+    nowClick(b, r.symbol, "Buy", r, { kind: "rocket", tpR: CFG.rocketTpR });
+  });
+  $("rockets").querySelectorAll("[data-rocket]").forEach(b => b.onclick = async () => {
+    const r = ROCKETS[Number(b.dataset.rocket)];
+    b.disabled = true;
+    try {
+      const msg = await arm(r, { kind: "rocket", tpR: CFG.rocketTpR, sides: CFG.rocketSides === "both" ? ["Buy", "Sell"] : ["Buy"] });
+      log(msg + ` · чому: ${r.reasons.join(", ")}`, /Пропуск|замало/.test(msg) ? "mute" : "gold-t");
+    } catch (e) { log(`${r.symbol}: ${e.message}`, "down"); }
+    render(); renderRockets();
+  });
+}
+$("btn-rocket").onclick = () => scanRocket(false);
+function paintMode() {
+  const on = CFG.mode === "rocket";
+  $("btn-mode").textContent = on ? "🚀 Режим ракет: увімк" : "🚀 Режим ракет: вимк";
+  $("btn-mode").className = on ? "green" : "";
+  $("scan-info").textContent = on ? "Режим ракет: бот ставить Buy Stop на монети з високим балом" : "Режим пробою: Buy Stop + Sell Stop на стиснені діапазони";
+}
+$("btn-mode").onclick = () => {
+  CFG.mode = CFG.mode === "rocket" ? "breakout" : "rocket";
+  LS.set("settings", CFG); paintMode(); lastScan = 0;
+  log(CFG.mode === "rocket" ? "Режим ракет увімкнено: бот шукає монети перед сильним рухом" : "Повернено режим пробою діапазону", "gold-t");
+  if (RUN) loop();
+};
+
+// ------------------------------------------------------------------ radar
+let RADAR = [], RADARLOG = LS.get("radarLog", []), radarBusy = false, radarAt = 0;
+async function pool(items, n, fn) {
+  let i = 0;
+  await Promise.all(Array.from({ length: n }, async () => { while (i < items.length) { const it = items[i++]; try { await fn(it); } catch (e) { /* skip */ } } }));
+}
+async function k5(symbol) {
+  const r = await bx("/v5/market/kline", { query: { category: "linear", symbol, interval: "5", limit: "64" } });
+  return (r.list || []).slice().reverse().map(k => ({ t: +k[0], o: +k[1], h: +k[2], l: +k[3], c: +k[4], v: +(k[6] ?? k[5] ?? 0) }));
+}
+function median(a) { const b = a.slice().sort((x, y) => x - y); return b.length ? b[Math.floor(b.length / 2)] : 0; }
+async function announcements() {
+  try {
+    const r = await bx("/v5/announcements/index", { query: { locale: "en-US", limit: "40" } });
+    const cutoff = Date.now() - 72 * 3600e3;
+    return (r.list || []).filter(a => Number(a.dateTimestamp || a.publishTime || 0) >= cutoff)
+      .map(a => ({ title: String(a.title || ""), url: a.url || "", type: (a.type && a.type.key) || "", t: Number(a.dateTimestamp || a.publishTime || 0) }));
+  } catch (e) { log("Анонси Bybit недоступні: " + e.message, "mute"); return []; }
+}
+function baseOf(symbol) { return symbol.replace(/USDT$/, "").replace(/^1000+/, "").replace(/^10+(?=[A-Z])/, ""); }
+async function radarDetail(c) {
+  const sym = c.symbol;
+  try {                                                         // open interest, 5-minute steps
+    const r = await bx("/v5/market/open-interest", { query: { category: "linear", symbol: sym, intervalTime: "5min", limit: "7" } });
+    const l = r.list || [];
+    if (l.length >= 4) c.oi15 = (Number(l[0].openInterest) / Number(l[3].openInterest) - 1) * 100;
+  } catch (e) { /* no OI */ }
+  try {                                                         // order book imbalance within 1% of price
+    const ob = await bx("/v5/market/orderbook", { query: { category: "linear", symbol: sym, limit: "200" } });
+    const lo = c.last * 0.99, hi = c.last * 1.01;
+    const bid = (ob.b || []).filter(x => Number(x[0]) >= lo).reduce((a, x) => a + Number(x[0]) * Number(x[1]), 0);
+    const ask = (ob.a || []).filter(x => Number(x[0]) <= hi).reduce((a, x) => a + Number(x[0]) * Number(x[1]), 0);
+    if (ask > 0) c.book = bid / ask;
+  } catch (e) { /* no book */ }
+  try {                                                         // share of accounts long
+    const r = await bx("/v5/market/account-ratio", { query: { category: "linear", symbol: sym, period: "5min", limit: "1" } });
+    const row = (r.list || [])[0];
+    if (row) c.longPct = Number(row.buyRatio) * 100;
+  } catch (e) { /* no ratio */ }
+}
+function radarScore(c) {
+  let sc = 0; const why = [];
+  if (c.volX >= 8) { sc += 30; why.push(`обсяг ×${c.volX.toFixed(1)} за 15 хв`); }
+  else if (c.volX >= 5) { sc += 24; why.push(`обсяг ×${c.volX.toFixed(1)}`); }
+  else if (c.volX >= 3) { sc += 16; why.push(`обсяг ×${c.volX.toFixed(1)}`); }
+  else if (c.volX >= 2) { sc += 8; why.push(`обсяг ×${c.volX.toFixed(1)}`); }
+  if (c.ch15 >= 1 && c.ch15 <= 6) { sc += 10; why.push(`+${c.ch15.toFixed(1)}% за 15 хв`); }
+  else if (c.ch15 > 12) { sc -= 15; why.push(`вже +${c.ch15.toFixed(1)}% — пізно`); }
+  else if (c.ch15 < -2) { sc -= 10; why.push(`падає ${c.ch15.toFixed(1)}%`); }
+  if (c.newHigh) { sc += 10; why.push("новий максимум 5 год"); }
+  if (c.oi15 != null) {
+    if (c.oi15 >= 5) { sc += 20; why.push(`OI +${c.oi15.toFixed(1)}% за 15 хв`); }
+    else if (c.oi15 >= 2.5) { sc += 12; why.push(`OI +${c.oi15.toFixed(1)}%`); }
+    else if (c.oi15 >= 1) { sc += 6; why.push(`OI +${c.oi15.toFixed(1)}%`); }
+  }
+  if (c.book != null) {
+    if (c.book >= 2) { sc += 10; why.push(`покупців у стакані ×${c.book.toFixed(1)}`); }
+    else if (c.book >= 1.4) { sc += 6; why.push(`стакан на боці покупців ×${c.book.toFixed(1)}`); }
+    else if (c.book <= 0.6) { sc -= 8; why.push(`стакан на боці продавців ×${c.book.toFixed(1)}`); }
+  }
+  if (c.longPct != null) {
+    if (c.longPct <= 45) { sc += 8; why.push(`шортів ${(100 - c.longPct).toFixed(0)}% — паливо для сквізу`); }
+    else if (c.longPct >= 70) { sc -= 5; why.push(`лонгів ${c.longPct.toFixed(0)}% — натовп уже в лонгах`); }
+  }
+  if (c.fund < 0) { sc += 5; why.push(`funding ${c.fund.toFixed(3)}%`); }
+  if (c.news) { sc += 15; why.push("свіжий анонс Bybit"); }
+  c.score = Math.max(0, Math.min(100, Math.round(sc)));
+  c.reasons = why;
+  return c;
+}
+async function runRadar() {
+  if (radarBusy) return;
+  radarBusy = true; radarAt = Date.now();
+  $("radar-run").disabled = true;
+  $("radar-info").textContent = "Сканую…";
+  try {
+    const [tick, news] = await Promise.all([bx("/v5/market/tickers", { query: { category: "linear" } }), announcements()]);
+    const list = (tick.list || [])
+      .filter(t => t.symbol.endsWith("USDT") && Number(t.turnover24h) >= CFG.radarTurnover * 1e6 && Number(t.lastPrice) > 0)
+      .sort((a, b) => Number(b.turnover24h) - Number(a.turnover24h)).slice(0, CFG.radarCoins);
+    const pre = [];
+    let done = 0;
+    await pool(list, 6, async (t) => {
+      const rows = await k5(t.symbol);
+      done++; if (done % 15 === 0) $("radar-info").textContent = `Сканую… ${done}/${list.length}`;
+      if (rows.length < 40) return;
+      const closed = rows.slice(0, -1), last3 = rows.slice(-3), prev = closed.slice(-51, -3);
+      const volX = median(prev.map(r => r.v)) ? (last3.reduce((a, r) => a + r.v, 0) / 3) / median(prev.map(r => r.v)) : 1;
+      const last = Number(t.lastPrice);
+      const ago = rows[rows.length - 4] ? rows[rows.length - 4].c : last;
+      const hiPrev = Math.max(...closed.slice(-60, -3).map(r => r.h));
+      const hour = rows.slice(-12);
+      let tr = 0; for (let i = rows.length - 14; i < rows.length; i++) tr += Math.max(rows[i].h - rows[i].l, Math.abs(rows[i].h - rows[i - 1].c), Math.abs(rows[i].l - rows[i - 1].c));
+      const base = baseOf(t.symbol);
+      const re = new RegExp(`(^|[^A-Z0-9])${base.replace(/[^A-Z0-9]/g, "")}([^A-Z0-9]|$)`);
+      const n = base.length >= 2 ? news.find(a => re.test(a.title.toUpperCase())) : null;
+      pre.push({
+        symbol: t.symbol, last, volX, ch15: (last / ago - 1) * 100, newHigh: last > hiPrev,
+        fund: Number(t.fundingRate || 0) * 100, news: n || null,
+        hi: Math.max(...hour.map(r => r.h)), lo: Math.min(...hour.map(r => r.l)), atr: tr / 14,
+      });
+    });
+    pre.forEach(radarScore);
+    pre.sort((a, b) => b.score - a.score);
+    const top = pre.slice(0, 25);
+    $("radar-info").textContent = "Деталі: OI, стакан, лонги/шорти…";
+    await pool(top, 4, radarDetail);
+    top.forEach(radarScore);
+    top.sort((a, b) => b.score - a.score);
+    RADAR = top;
+    const hot = RADAR.filter(c => c.score >= CFG.radarScore);
+    for (const c of hot) {                                   // remember for the 1-hour check (once per symbol per hour)
+      if (RADARLOG.some(x => x.symbol === c.symbol && Date.now() - x.t < 3600e3)) continue;
+      RADARLOG.push({ t: Date.now(), symbol: c.symbol, score: c.score, price: c.last, why: c.reasons.join(", "), status: "wait" });
+    }
+    LS.set("radarLog", RADARLOG.slice(-2000));
+    $("radar-info").textContent = `${new Date().toLocaleTimeString()} · перевірено ${list.length} · анонсів за 72 год ${news.length} · бал ≥ ${CFG.radarScore}: ${hot.length}`;
+    renderRadar();
+    if (LS.get("radarPlace", false) && RUN) {
+      let room = CFG.maxSetups - SETUPS.length;
+      for (const c of hot) {
+        if (room <= 0) break;
+        if (SETUPS.some(x => x.symbol === c.symbol) || POS.some(x => x.symbol === c.symbol) || (COOL[c.symbol] || 0) > Date.now()) continue;
+        const msg = await placeRadar(c);
+        if (msg && !/Пропуск|замало/.test(msg)) room--;
+      }
+    }
+  } catch (e) { $("radar-info").textContent = "Помилка: " + e.message; log("Радар: " + e.message, "down"); }
+  finally { radarBusy = false; $("radar-run").disabled = false; }
+}
+function radarAsSetup(c) {
+  const mid = (c.hi + c.lo) / 2;
+  return { symbol: c.symbol, last: c.last, hi: c.hi, lo: c.lo, mid, width: (c.hi - c.lo) / mid * 100, squeeze: 0, er: 0, atr: c.atr, pos: 1, score: c.score, reasons: c.reasons };
+}
+async function placeRadar(c) {
+  try {
+    const msg = await arm(radarAsSetup(c), { kind: "rocket", tpR: CFG.radarTpR, sides: ["Buy"] });
+    log("⚡ " + msg + ` · чому: ${c.reasons.join(", ")}`, /Пропуск|замало/.test(msg) ? "mute" : "gold-t");
+    render(); return msg;
+  } catch (e) { log(`⚡ ${c.symbol}: ${e.message}`, "down"); return null; }
+}
+async function checkRadarLog() {
+  const due = RADARLOG.filter(x => x.status === "wait" && Date.now() - x.t >= 3600e3).slice(0, 10);
+  for (const x of due) {
+    try {
+      const r = await bx("/v5/market/kline", { query: { category: "linear", symbol: x.symbol, interval: "1", start: String(x.t), end: String(x.t + 3600e3), limit: "61" } });
+      const rows = (r.list || []).map(k => ({ h: +k[2], l: +k[3], c: +k[4], t: +k[0] })).sort((a, b) => a.t - b.t);
+      if (!rows.length) { x.status = "nodata"; continue; }
+      x.max = (Math.max(...rows.map(k => k.h)) / x.price - 1) * 100;
+      x.min = (Math.min(...rows.map(k => k.l)) / x.price - 1) * 100;
+      x.end = (rows[rows.length - 1].c / x.price - 1) * 100;
+      x.status = x.max >= 3 ? "hit" : "miss";
+    } catch (e) { /* try later */ }
+  }
+  if (due.length) { LS.set("radarLog", RADARLOG.slice(-2000)); renderRadarLog(); }
+}
+const pc = (v) => v == null ? "—" : (v >= 0 ? "+" : "") + v.toFixed(2) + "%";
+function renderRadar() {
+  $("radar").innerHTML = RADAR.length ? RADAR.map((c, i) => {
+    const hot = c.score >= CFG.radarScore;
+    const armed = SETUPS.some(s => s.symbol === c.symbol);
+    return `<tr><td><b>${esc(c.symbol)}</b></td>
+      <td><b class="${hot ? "up" : "mute"}">${c.score}</b> <span class="bar-mini" style="width:${Math.round(c.score * 0.6)}px;opacity:${hot ? 1 : .35}"></span></td>
+      <td>${c.last}</td><td class="${c.ch15 >= 0 ? "up" : "down"}">${pc(c.ch15)}</td>
+      <td class="${c.volX >= 3 ? "up" : ""}">×${c.volX.toFixed(1)}</td><td class="${(c.oi15 || 0) >= 2.5 ? "up" : ""}">${c.oi15 == null ? "—" : pc(c.oi15)}</td>
+      <td class="${(c.book || 1) >= 1.4 ? "up" : (c.book || 1) <= 0.6 ? "down" : ""}">${c.book == null ? "—" : "×" + c.book.toFixed(2)}</td>
+      <td>${c.longPct == null ? "—" : (100 - c.longPct).toFixed(0) + "%"}</td>
+      <td class="${c.fund < 0 ? "up" : ""}">${c.fund.toFixed(3)}%</td>
+      <td style="white-space:normal;max-width:180px">${c.news ? `<a href="${esc(c.news.url)}" target="_blank" rel="noopener" style="color:var(--gold)">${esc(c.news.title.slice(0, 60))}</a>` : "—"}</td>
+      <td style="white-space:normal;min-width:220px" class="mute">${esc(c.reasons.join(" · ") || "—")}</td>
+      <td style="white-space:nowrap">${armed ? `<span class="tag armed">стоїть</span>` : `<button data-radar="${i}" style="min-height:30px">Поставити</button> <button data-dnow="${i}" class="green" style="min-height:30px" title="без очікування пробою">⚡ Зайти зараз</button>`}</td></tr>`;
+  }).join("") : `<tr><td colspan="12" class="mute">Зараз сильних сигналів немає</td></tr>`;
+  $("radar").querySelectorAll("[data-dnow]").forEach(b => b.onclick = () => {
+    const c = RADAR[Number(b.dataset.dnow)];
+    nowClick(b, c.symbol, "Buy", c, { kind: "rocket", tpR: CFG.radarTpR });
+  });
+  $("radar").querySelectorAll("[data-radar]").forEach(b => b.onclick = async () => {
+    if (!$("k-key").value.trim()) { log("Спочатку введіть ключі на вкладці «Бот»", "down"); return; }
+    b.disabled = true; await placeRadar(RADAR[Number(b.dataset.radar)]); renderRadar();
+  });
+  renderRadarLog();
+}
+function renderRadarLog() {
+  const done = RADARLOG.filter(x => x.status === "hit" || x.status === "miss");
+  const hits = done.filter(x => x.status === "hit");
+  const avg = (a, k) => a.length ? a.reduce((s, x) => s + x[k], 0) / a.length : 0;
+  const strong = done.filter(x => x.score >= 75), sh = strong.filter(x => x.status === "hit");
+  const k = [
+    ["Сигналів перевірено", done.length], ["Чекають години", RADARLOG.filter(x => x.status === "wait").length],
+    ["Влучань (макс ≥ +3%)", done.length ? (hits.length / done.length * 100).toFixed(0) + "%" : "—"],
+    ["Сер. макс за год", pc(done.length ? avg(done, "max") : null)], ["Сер. через 1 год", pc(done.length ? avg(done, "end") : null)],
+    ["Сер. мін за год", pc(done.length ? avg(done, "min") : null)],
+    ["Бал ≥ 75: влучань", strong.length ? `${(sh.length / strong.length * 100).toFixed(0)}% з ${strong.length}` : "—"],
+  ];
+  $("radar-kpis").innerHTML = k.map(([n, v]) => `<div class="kpi"><span>${n}</span><b>${v}</b></div>`).join("");
+  $("radar-log").innerHTML = RADARLOG.length ? RADARLOG.slice().reverse().slice(0, 150).map(x => `<tr>
+    <td>${new Date(x.t).toLocaleString([], { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}</td>
+    <td><b>${esc(x.symbol)}</b></td><td>${x.score}</td><td>${x.price}</td>
+    <td class="up">${pc(x.max)}</td><td class="down">${pc(x.min)}</td><td class="${(x.end || 0) >= 0 ? "up" : "down"}">${pc(x.end)}</td>
+    <td>${x.status === "wait" ? `<span class="tag armed">чекаю ${Math.max(0, Math.ceil((x.t + 3600e3 - Date.now()) / 60000))} хв</span>` : x.status === "hit" ? `<span class="tag long">влучання</span>` : x.status === "miss" ? `<span class="tag short">мимо</span>` : "—"}</td>
+    <td class="mute" style="white-space:normal;min-width:200px">${esc(x.why)}</td></tr>`).join("")
+    : `<tr><td colspan="9" class="mute">Ще немає сигналів</td></tr>`;
+}
+function paintRadarButtons() {
+  const a = LS.get("radarAuto", false), p = LS.get("radarPlace", false);
+  $("radar-auto").textContent = "Авто-оновлення: " + (a ? `кожні ${CFG.radarEvery} хв` : "вимк");
+  $("radar-auto").className = a ? "green" : "";
+  $("radar-place").textContent = "Авто-ставити: " + (p ? "увімк (коли бот запущено)" : "вимк");
+  $("radar-place").className = p ? "green" : "";
+}
+$("radar-run").onclick = () => runRadar();
+$("radar-auto").onclick = () => { LS.set("radarAuto", !LS.get("radarAuto", false)); paintRadarButtons(); if (LS.get("radarAuto", false)) runRadar(); };
+$("radar-place").onclick = () => {
+  const on = !LS.get("radarPlace", false);
+  if (on && !confirm("Бот сам ставитиме Buy Stop на монети з балом ≥ порогу (коли бот запущено).\nЦе агресивна торгівля: багато сигналів не дадуть руху. Увімкнути?")) return;
+  LS.set("radarPlace", on); paintRadarButtons();
+};
+$("radar-csv").onclick = () => {
+  const cols = ["t", "symbol", "score", "price", "max", "min", "end", "status", "why"];
+  const lines = [cols.join(",")].concat(RADARLOG.map(x => cols.map(c => {
+    let v = c === "t" ? new Date(x.t).toISOString() : x[c]; v = v ?? "";
+    return /[",\n]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : v;
+  }).join(",")));
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob(["\ufeff" + lines.join("\n")], { type: "text/csv" }));
+  a.download = "radar-signals.csv"; a.click();
+};
+$("radar-clear").onclick = () => { if (confirm("Очистити історію сигналів радара?")) { RADARLOG = []; LS.set("radarLog", []); renderRadarLog(); } };
+document.querySelectorAll(".tabs [data-tab]").forEach(b => b.onclick = () => {
+  document.querySelectorAll(".tabs [data-tab]").forEach(x => x.classList.toggle("act", x === b));
+  $("tab-bot").classList.toggle("hidden", b.dataset.tab !== "bot");
+  $("tab-radar").classList.toggle("hidden", b.dataset.tab !== "radar");
+  LS.set("tab", b.dataset.tab);
+});
+setInterval(() => {
+  if (LS.get("radarAuto", false) && !radarBusy && Date.now() - radarAt >= CFG.radarEvery * 60e3) runRadar();
+  checkRadarLog();
+}, 30000);
+
+// ------------------------------------------------------------------ enter now
+async function analyseNow(symbol) {
+  const t = await bx("/v5/market/tickers", { query: { category: "linear", symbol } });
+  const row = (t.list || [])[0];
+  if (!row) throw new BybitErr("Немає монети " + symbol);
+  const rows = await candles(symbol, 200);
+  const a = analyse(symbol, rows, Number(row.lastPrice));
+  if (!a.hi) throw new BybitErr(symbol + ": замало свічок для розрахунку стопу");
+  a.bid = Number(row.bid1Price) || a.last; a.ask = Number(row.ask1Price) || a.last;
+  return a;
+}
+function nowPlan(a, sp, side, lev, tpR) {
+  const long = side === "Buy";
+  const raw = long ? a.ask * (1 + CFG.nowSlip / 100) : a.bid * (1 - CFG.nowSlip / 100);
+  const entry = Number(align(raw, sp.tick, long));
+  const buf = CFG.buffer / 100;
+  let sl = long ? Number(a.lo) * (1 - buf) : Number(a.hi) * (1 + buf);        // beyond the range edge
+  let risk = long ? entry - sl : sl - entry;
+  if (!(risk > 0) || risk / entry * 100 < 0.4) risk = Math.max(risk > 0 ? risk : 0, CFG.atrK * a.atr, entry * 0.004);
+  const cap = entry * (80 / lev) * 0.8 / 100;                                    // well before liquidation
+  let capped = false;
+  if (risk > cap) { risk = cap; capped = true; }
+  sl = long ? entry - risk : entry + risk;
+  const tp = long ? entry + tpR * risk : entry - tpR * risk;
+  return {
+    side, trigger: align(entry, sp.tick, long), limit: align(entry, sp.tick, long),
+    sl: align(sl, sp.tick, !long), tp: align(tp, sp.tick, long), risk, riskPct: risk / entry * 100, capped,
+  };
+}
+async function placeLimitAny(symbol, side, price, qty, linkId, reduceOnly, tif = "PostOnly") {
+  const body = { category: "linear", symbol, side, orderType: "Limit", qty, price, timeInForce: tif, orderLinkId: linkId, reduceOnly, positionIdx: 0 };
+  try { return await bx("/v5/order/create", { method: "POST", body, auth: true }); }
+  catch (e) {
+    if (!/position idx/i.test(e.message)) throw e;
+    const longSide = reduceOnly ? side === "Sell" : side === "Buy";
+    return bx("/v5/order/create", { method: "POST", body: { ...body, positionIdx: longSide ? 1 : 2 }, auth: true });
+  }
+}
+async function enterNow(symbol, side, src = null, opts = {}) {
+  if (!$("k-key").value.trim()) throw new BybitErr("Спочатку введіть API ключі вгорі сторінки");
+  symbol = String(symbol || "").trim().toUpperCase();
+  if (!/^[A-Z0-9]{2,30}USDT$/.test(symbol)) throw new BybitErr("Монета на кшталт SOLUSDT");
+  if (SETUPS.some(x => x.symbol === symbol && x.state !== "armed")) throw new BybitErr(symbol + ": по монеті вже є позиція бота");
+  const old = SETUPS.find(x => x.symbol === symbol && x.state === "armed");
+  if (old) { await cancelAll(old); await cancelDip(old); SETUPS = SETUPS.filter(x => x !== old); log(`${symbol}: стоп-ордери пробою знято — входжу зараз`, "mute"); }
+  const a = await analyseNow(symbol);
+  if (src) { a.score = src.score; a.reasons = src.reasons; }
+  const sp = await spec(symbol);
+  const lev = Math.min(CFG.leverage, Math.floor(sp.maxLev));
+  const long = side === "Buy";
+  const plan = nowPlan(a, sp, side, lev, opts.tpR || CFG.tpR);
+  const qty = align(CFG.margin * lev / Number(plan.limit), sp.step, false);
+  if (Number(qty) < sp.minQty || Number(qty) * Number(plan.limit) < sp.minNotional)
+    throw new BybitErr(`${symbol}: ${CFG.margin} USDT × x${lev} замало (мін. ${sp.minNotional} USDT на ордер)`);
+  try { await bx("/v5/position/set-leverage", { method: "POST", body: { category: "linear", symbol, buyLeverage: String(lev), sellLeverage: String(lev) }, auth: true }); }
+  catch (e) { if (e.code !== 110043 && !/not modified/i.test(e.message)) throw e; }
+  const id = ("bn" + symbol.slice(0, 12) + (long ? "B" : "S") + Date.now().toString(36)).slice(0, 36);
+  await createOrder({
+    category: "linear", symbol, side, orderType: "Limit", qty, price: plan.limit, timeInForce: "GTC", orderLinkId: id, reduceOnly: false,
+    stopLoss: plan.sl, takeProfit: plan.tp, tpslMode: "Full", slTriggerBy: "MarkPrice", tpTriggerBy: "LastPrice",
+  });
+  const now = Date.now();
+  const leg = { ...plan, id };
+  const s = {
+    symbol, state: "armed", createdAt: now, expiresAt: now + CFG.nowWaitMin * 60e3, qty, lev, now: true,
+    hi: align(a.hi, sp.tick, true), lo: align(a.lo, sp.tick, false), mid: align(a.mid, sp.tick, false),
+    width: a.width, squeeze: a.squeeze, er: a.er, atr: a.atr,
+    buy: long ? leg : null, sell: long ? null : leg, kind: opts.kind || "now", score: a.score ?? null,
+    reasons: ["вхід одразу без пробою"].concat(a.reasons || []),
+  };
+  SETUPS.push(s);
+  // ladder of limit adds between the entry and the stop
+  const n = CFG.nowLadder, notes = [];
+  s.dip = { levels: [], step: 0, fills: 0, cycles: 0, ladder: true };
+  if (n > 0) {
+    const lqty = align(Number(qty) * CFG.dipSize / 100, sp.step, false);
+    const dist = plan.risk * CFG.nowLadderDepth / 100;
+    const gap = dist / n;
+    if (Number(lqty) >= sp.minQty && Number(lqty) * Number(plan.limit) >= sp.minNotional) {
+      for (let k = 1; k <= n; k++) {
+        const px = align(long ? Number(plan.limit) - gap * k : Number(plan.limit) + gap * k, sp.tick, !long);
+        if (s.dip.levels.some(l => l.price === px)) continue;
+        const l = { k, price: px, qty: lqty, state: "add", cycles: 0, id: dipLink(symbol, side, k) };
+        try { await placeLimitAny(symbol, side, px, lqty, l.id, false); s.dip.levels.push(l); }
+        catch (e) { notes.push(`рівень ${px}: ${e.message}`); if (/insufficient|not enough|ab not enough/i.test(e.message)) break; }
+      }
+      s.dip.step = Number(align(gap, sp.tick, true));
+    } else notes.push(`лімітки сітки по ${lqty} менші за мінімум біржі`);
+  }
+  saveSetups(); render();
+  const msg = `⚡ ${symbol}: ${long ? "ЛОНГ" : "ШОРТ"} зараз — ліміт ${plan.limit} × ${qty}, x${lev}, стоп ${plan.sl} (${plan.riskPct.toFixed(2)}%${plan.capped ? ", підтягнуто до безпечного для плеча" : ""}), тейк ${plan.tp}`
+    + (s.dip.levels.length ? `; сітка ${s.dip.levels.map(l => l.price).join(", ")} по ${s.dip.levels[0].qty}, відскок +${s.dip.step}` : "")
+    + (notes.length ? `; ${notes.join("; ")}` : "");
+  log(msg, long ? "up" : "down");
+  return msg;
+}
+async function nowClick(btn, symbol, side, src, opts) {
+  btn.disabled = true;
+  try { await enterNow(symbol, side, src, opts); }
+  catch (e) { log(`⚡ ${symbol}: ${e.message}`, "down"); showErr(e.message); }
+  finally { btn.disabled = false; render(); if (typeof renderRockets === "function") renderRockets(); if (RADAR.length) renderRadar(); }
+}
+$("now-long").onclick = (e) => nowClick(e.currentTarget, $("now-sym").value, "Buy");
+$("now-short").onclick = (e) => nowClick(e.currentTarget, $("now-sym").value, "Sell");
+
+// ------------------------------------------------------------------ dip grid
+const dipOn = (s) => (s.dip && s.dip.ladder) || CFG.dipMode === "all" || (CFG.dipMode === "rocket" && s.kind === "rocket");
+function dipLink(symbol, side, k) { return ("bg" + symbol.slice(0, 11) + (side === "Buy" ? "B" : "S") + k + Date.now().toString(36)).slice(0, 36); }
+async function placeLimit(symbol, side, price, qty, linkId, reduceOnly, idx) {
+  if (!idx) return placeLimitAny(symbol, side, price, qty, linkId, reduceOnly);
+  const body = { category: "linear", symbol, side, orderType: "Limit", qty, price, timeInForce: "PostOnly", orderLinkId: linkId, reduceOnly, positionIdx: idx };
+  return bx("/v5/order/create", { method: "POST", body, auth: true });
+}
+async function orderState(symbol, linkId) {
+  const r = await bx("/v5/order/history", { query: { category: "linear", symbol, orderLinkId: linkId, limit: "5" }, auth: true });
+  const row = (r.list || []).find(o => o.orderLinkId === linkId);
+  if (!row) return "unknown";
+  if (row.orderStatus === "Filled") return "filled";
+  if (["New", "PartiallyFilled", "Untriggered"].includes(row.orderStatus)) return "live";
+  return Number(row.cumExecQty || 0) > 0 ? "filled" : "cancelled";
+}
+async function buildDip(s, pos, sp, long, idx) {
+  const entry0 = s.entry0 || Number(pos.avgPrice);
+  const leg = (long ? s.buy : s.sell) || legsOf(s)[0];
+  const ext = long ? s.hiSince : s.loSince;              // best price since entry
+  const move = Math.abs(ext - entry0);
+  if (move <= 0) return;
+  const floor = long ? Math.max(entry0 * 1.004, Number(leg.sl) * 1.003) : Math.min(entry0 * 0.996, Number(leg.sl) * 0.997);
+  const n = CFG.dipLevels, depth = CFG.dipDepth / 100;
+  const qty = align(Number(s.qty) * CFG.dipSize / 100, sp.step, false);
+  if (Number(qty) < sp.minQty || Number(qty) * entry0 < sp.minNotional) {
+    s.dip = { levels: [], skipped: true };
+    log(`${s.symbol}: сітку на відкат пропущено — рівень ${qty} менший за мінімум біржі (збільште % розміру рівня)`, "mute");
+    return;
+  }
+  const levels = [];
+  for (let k = 0; k < n; k++) {
+    const frac = n === 1 ? 0.382 : 0.236 + (depth - 0.236) * k / (n - 1);
+    let px = long ? ext - move * frac : ext + move * frac;
+    if (long ? px < floor : px > floor) continue;
+    const price = align(px, sp.tick, !long);
+    if (levels.some(l => l.price === price)) continue;
+    levels.push({ k, price, qty, state: "add", cycles: 0 });
+  }
+  if (!levels.length) { s.dip = { levels: [], skipped: true }; log(`${s.symbol}: рух ще замалий для сітки на відкат (рівні нижче стопу/входу)`, "mute"); return; }
+  const step = levels.length > 1 ? Math.abs(Number(levels[0].price) - Number(levels[1].price)) : move * 0.236;
+  s.dip = { levels, step: Number(align(step, sp.tick, true)), placedAt: Date.now(), fills: 0, cycles: 0 };
+  for (const l of levels) {
+    l.id = dipLink(s.symbol, long ? "Buy" : "Sell", l.k);
+    try { await placeLimit(s.symbol, long ? "Buy" : "Sell", l.price, qty, l.id, false, idx); }
+    catch (e) { l.state = "dead"; log(`${s.symbol}: рівень ${l.price} не прийнято: ${e.message}`, "down"); }
+  }
+  const ok = levels.filter(l => l.state === "add");
+  if (ok.length) log(`${s.symbol}: 🪜 сітка на відкат — ${long ? "Buy" : "Sell"} ${ok.map(l => l.price).join(", ")} по ${qty}, відскок +${s.dip.step}`, "gold-t");
+}
+async function runDip(s, live, long, idx) {
+  const sp = await spec(s.symbol);
+  for (const l of s.dip.levels) {
+    if (l.state === "dead" || live.has(l.id)) continue;
+    const st = await orderState(s.symbol, l.id);
+    if (st === "live" || st === "unknown") continue;
+    if (st === "cancelled") { l.state = "dead"; continue; }
+    if (l.state === "add") {                                   // add filled -> take the bounce
+      s.dip.fills++;
+      const tp = align(long ? Number(l.price) + s.dip.step : Number(l.price) - s.dip.step, sp.tick, long);
+      l.id = dipLink(s.symbol, long ? "Sell" : "Buy", l.k); l.state = "bounce"; l.tp = tp;
+      try { await placeLimit(s.symbol, long ? "Sell" : "Buy", tp, l.qty, l.id, true, idx); log(`${s.symbol}: 🪜 докуплено ${l.qty} @ ${l.price} на відкаті, продаж на відскоку ${tp}`, "up"); }
+      catch (e) { l.state = "dead"; log(`${s.symbol}: відскок ${tp} не прийнято: ${e.message}`, "down"); }
+    } else {                                                   // bounce filled -> re-arm the add
+      l.cycles++; s.dip.cycles++;
+      l.id = dipLink(s.symbol, long ? "Buy" : "Sell", l.k); l.state = "add";
+      try { await placeLimit(s.symbol, long ? "Buy" : "Sell", l.price, l.qty, l.id, false, idx); log(`${s.symbol}: 🪜 відскок ${l.tp} взято (цикл ${l.cycles}), знову чекаю відкат до ${l.price}`, "up"); }
+      catch (e) { l.state = "dead"; log(`${s.symbol}: повтор рівня ${l.price} не прийнято: ${e.message}`, "down"); }
+    }
+  }
+}
+async function cancelDip(s) {
+  for (const l of (s.dip && s.dip.levels) || []) if (l.state !== "dead") await cancelLink(s.symbol, l.id);
+}
+
+// ------------------------------------------------------------------ manage
+async function closedPnl(symbol, from) {
+  const r = await bx("/v5/position/closed-pnl", { query: { category: "linear", symbol, startTime: String(from - 60e3), limit: "50" }, auth: true });
+  return r.list || [];
+}
+function exitReason(s, exitPx) {
+  const leg = (s.state === "long" ? s.buy : s.sell) || legsOf(s)[0];
+  const cands = [["Тейк-профіт", Number(leg.tp)], ["Стоп-лос", Number(leg.sl)]];
+  if (s.beDone) cands.push(["Беззбиток", Number(s.entry)]);
+  if (s.trailOn) cands.push(["Трейлінг", null]);
+  let best = "Закрито", d = Infinity;
+  for (const [name, px] of cands) {
+    if (px == null) continue;
+    const dd = Math.abs(exitPx - px) / px;
+    if (dd < d) { d = dd; best = name; }
+  }
+  if (s.trailOn && best !== "Тейк-профіт" && d > 0.003) best = "Трейлінг";
+  return d < 0.01 || best === "Трейлінг" ? best : "Вручну / інше";
+}
+async function recordClose(s, now, forced = "") {
+  const long = s.state === "long";
+  const leg = (long ? s.buy : s.sell) || legsOf(s)[0];
+  const from = s.openedAt || s.createdAt;
+  let pnl = 0, exitPx = null;
+  try {
+    const rows = (await closedPnl(s.symbol, from)).filter(x => Number(x.createdTime) >= from - 60e3);
+    pnl = rows.reduce((a, x) => a + Number(x.closedPnl || 0), 0);
+    exitPx = rows.length ? Number(rows[rows.length - 1].avgExitPrice) : null;  // oldest close = this leg
+    if (!forced && rows.length) exitPx = Number(rows[0].avgExitPrice);
+  } catch (e) { log(`${s.symbol}: PnL не прочитано: ${e.message}`, "down"); }
+  const e0 = s.entry0 || s.entry || Number(leg.trigger);
+  const risk = Math.abs(e0 - Number(leg.sl));
+  const rMult = exitPx && risk ? ((long ? exitPx - e0 : e0 - exitPx) / risk) : 0;
+  const why = forced || (exitPx ? exitReason(s, exitPx) : "Закрито");
+  JOURNAL.push({ symbol: s.symbol, side: long ? "LONG" : "SHORT", entry: s.entry, exit: exitPx, result: why, r: Math.round(rMult * 100) / 100,
+    maxR: Math.round((s.maxR || 0) * 100) / 100, pnl: Math.round(pnl * 1e4) / 1e4, openedAt: s.openedAt, closedAt: now,
+    width: s.width, squeeze: s.squeeze, er: s.er, lev: s.lev, kind: s.kind || "breakout", score: s.score ?? null, why: (s.reasons || []).join(", "),
+    dipFills: s.dip ? s.dip.fills || 0 : 0, dipCycles: s.dip ? s.dip.cycles || 0 : 0 });
+  log(`${s.symbol}: закрито — ${why}, ${rMult >= 0 ? "+" : ""}${rMult.toFixed(2)}R, PnL ${pnl >= 0 ? "+" : ""}${pnl.toFixed(4)} USDT`, pnl >= 0 ? "up" : "down");
+}
+async function manage() {
+  const posRes = await bx("/v5/position/list", { query: { category: "linear", settleCoin: "USDT", limit: "200" }, auth: true });
+  POS = (posRes.list || []).filter(p => Number(p.size) > 0);
+  const stopRes = await bx("/v5/order/realtime", { query: { category: "linear", settleCoin: "USDT", orderFilter: "StopOrder", limit: "50" }, auth: true });
+  const live = new Set((stopRes.list || []).map(o => o.orderLinkId));
+  if (SETUPS.some(x => x.now || (x.dip && x.dip.levels && x.dip.levels.length))) {
+    let cursor = "";
+    for (let i = 0; i < 4; i++) {
+      const q = { category: "linear", settleCoin: "USDT", limit: "50" };
+      if (cursor) q.cursor = cursor;
+      const r = await bx("/v5/order/realtime", { query: q, auth: true });
+      (r.list || []).forEach(o => live.add(o.orderLinkId));
+      cursor = r.nextPageCursor || "";
+      if (!cursor) break;
+    }
+  }
+  const now = Date.now();
+  for (const s of [...SETUPS]) {
+    const pos = POS.find(p => p.symbol === s.symbol);
+    if (s.state === "armed") {
+      if (pos) {
+        s.state = pos.side === "Buy" ? "long" : "short";
+        s.entry = Number(pos.avgPrice); s.entry0 = s.entry;
+        s.openedAt = now;
+        const other = s.state === "long" ? s.sell : s.buy;
+        if (other) await cancelLink(s.symbol, other.id);
+        if (s.now) log(`${s.symbol}: ⚡ вхід виконано → ${s.state.toUpperCase()} @ ${s.entry}, стоп і тейк на біржі`, s.state === "long" ? "up" : "down");
+        else log(`${s.symbol}: ПРОБІЙ ${s.state === "long" ? "вгору → LONG" : "вниз → SHORT"} @ ${s.entry}. Протилежний ордер знято`, s.state === "long" ? "up" : "down");
+      } else if (now > s.expiresAt) {
+        await cancelAll(s);
+        await cancelDip(s);
+        SETUPS = SETUPS.filter(x => x !== s);
+        COOL[s.symbol] = now + CFG.cooldownMin * 60e3;
+        log(s.now ? `${s.symbol}: ⚡ ліміт входу не виконався за ${CFG.nowWaitMin} хв — вхід і сітку знято` : `${s.symbol}: пробою не було ${CFG.expiryH} год — ордери знято`, "mute");
+        JOURNAL.push({ symbol: s.symbol, side: "—", result: "Без пробою", openedAt: s.createdAt, closedAt: now, pnl: 0, r: 0, width: s.width, squeeze: s.squeeze, er: s.er, noTrade: true });
+      } else if (!legsOf(s).some(l => live.has(l.id))) {
+        await cancelDip(s);
+        SETUPS = SETUPS.filter(x => x !== s);
+        log(`${s.symbol}: ${s.now ? "ліміт входу" : "обидва стоп-ордери"} зникли з біржі (знято вручну?) — сетап прибрано`, "mute");
+      }
+      continue;
+    }
+    // position phase
+    const leg = (s.state === "long" ? s.buy : s.sell) || legsOf(s)[0];
+    const long = s.state === "long";
+    if (pos && (long ? pos.side !== "Buy" : pos.side !== "Sell")) {
+      // first leg was stopped out and the opposite stop fired while the page was closed
+      await recordClose(s, now, "Стоп-лос (сторінка була закрита)");
+      s.state = pos.side === "Buy" ? "long" : "short";
+      await cancelDip(s); s.dip = null;
+      s.entry = Number(pos.avgPrice); s.entry0 = s.entry; s.openedAt = now; s.beDone = false; s.trailOn = false; s.maxR = 0;
+      s.hiSince = s.loSince = s.entry;
+      log(`${s.symbol}: поки сторінка була закрита, спрацював протилежний бік → ${s.state.toUpperCase()} @ ${s.entry}`, "gold-t");
+      continue;
+    }
+    if (pos) {
+      const mark = Number(pos.markPrice);
+      if (!s.entry0) s.entry0 = Number(pos.avgPrice) || s.entry;
+      const entry = s.entry0;                                  // R is measured from the breakout entry, not the averaged one
+      s.entry = Number(pos.avgPrice) || s.entry;
+      s.hiSince = Math.max(s.hiSince || mark, mark);
+      s.loSince = Math.min(s.loSince || mark, mark);
+      const risk = Math.abs(entry - Number(leg.sl)) || legsOf(s)[0].risk;
+      const r = (long ? mark - entry : entry - mark) / risk;
+      s.maxR = Math.max(s.maxR || 0, r);
+      const idx = Number(pos.positionIdx || 0);
+      const sp = await spec(s.symbol);
+      if (!Number(pos.stopLoss) && !s.trailOn) {                 // e.g. a ladder limit filled before the entry: protect at once
+        try {
+          await bx("/v5/position/trading-stop", { method: "POST", auth: true, body: { category: "linear", symbol: s.symbol, stopLoss: leg.sl, takeProfit: leg.tp, slTriggerBy: "MarkPrice", tpslMode: "Full", positionIdx: idx } });
+          log(`${s.symbol}: стоп ${leg.sl} і тейк ${leg.tp} поставлено на позицію`, "gold-t");
+        } catch (e) { log(`${s.symbol}: не вдалося поставити стоп: ${e.message}`, "down"); }
+      }
+      if (CFG.beR > 0 && !s.beDone && r >= CFG.beR) {
+        const be = align(long ? entry * 1.0012 : entry * 0.9988, sp.tick, long);
+        try {
+          await bx("/v5/position/trading-stop", { method: "POST", auth: true, body: { category: "linear", symbol: s.symbol, stopLoss: be, slTriggerBy: "MarkPrice", tpslMode: "Full", positionIdx: idx } });
+          s.beDone = true; log(`${s.symbol}: +${r.toFixed(2)}R — стоп у беззбиток ${be}`, "up");
+        } catch (e) { log(`${s.symbol}: беззбиток не вдався: ${e.message}`, "down"); }
+      }
+      if (CFG.trailR > 0 && !s.trailOn && r >= CFG.trailR) {
+        const dist = align(risk * CFG.trailDist, sp.tick, true);
+        try {
+          await bx("/v5/position/trading-stop", { method: "POST", auth: true, body: { category: "linear", symbol: s.symbol, trailingStop: dist, tpslMode: "Full", positionIdx: idx } });
+          s.trailOn = true; log(`${s.symbol}: +${r.toFixed(2)}R — трейлінг-стоп ${dist}`, "up");
+        } catch (e) { log(`${s.symbol}: трейлінг не вдався: ${e.message}`, "down"); }
+      }
+      if (dipOn(s)) {
+        try {
+          if (!s.dip && r >= CFG.dipStartR) await buildDip(s, pos, sp, long, idx);
+          else if (s.dip && s.dip.levels.length) await runDip(s, live, long, idx);
+        } catch (e) { log(`${s.symbol}: сітка на відкат: ${e.message}`, "down"); }
+      }
+      continue;
+    }
+    // position gone → closed
+    await recordClose(s, now);
+    await cancelAll(s);
+    await cancelDip(s);
+    SETUPS = SETUPS.filter(x => x !== s);
+    COOL[s.symbol] = now + CFG.cooldownMin * 60e3;
+  }
+  saveSetups(); LS.set("journal", JOURNAL.slice(-3000)); LS.set("cool", COOL);
+}
+
+// ------------------------------------------------------------------ loop
+// ------------------------------------------------------------------ autopilot
+// Both strategies every scan; if several scans in a row find nothing while there are free slots,
+// the filters are relaxed step by step (max 3 steps) so new orders keep appearing; reset after a hit.
+let AP = Object.assign({ dry: 0, relax: 0, last: 0, added: 0 }, LS.get("ap", {}));
+const RELAX_KEYS = ["squeeze", "maxEr", "maxWidth", "rocketScore"];
+async function autopilotScan() {
+  const base = Object.fromEntries(RELAX_KEYS.map(k => [k, CFG[k]]));
+  const r = AP.relax || 0;
+  if (r) {
+    CFG.squeeze = Math.min(100, base.squeeze + 10 * r);
+    CFG.maxEr = Math.min(1, +(base.maxEr + 0.08 * r).toFixed(2));
+    CFG.maxWidth = +(base.maxWidth * (1 + 0.25 * r)).toFixed(2);
+    CFG.rocketScore = Math.max(10, base.rocketScore - 5 * r);
+  }
+  const before = SETUPS.length;
+  try {
+    await scan();
+    if (RUN && !CFG.scalp && CFG.maxSetups - SETUPS.length > 0) await scanRocket(true);
+  } finally { Object.assign(CFG, base); }
+  const added = SETUPS.length - before, free = CFG.maxSetups - SETUPS.length;
+  AP.last = Date.now(); AP.added += Math.max(0, added);
+  if (added > 0) { AP.dry = 0; if (AP.relax) { log(`Автопілот: знайдено ${added}, фільтри повернуто до звичайних`, "mute"); AP.relax = 0; } }
+  else if (free > 0) {
+    AP.dry++;
+    if (AP.dry >= 3 && AP.relax < 3) { AP.relax++; AP.dry = 0; log(`Автопілот: 3 скани без нових сетапів — послаблюю фільтри (крок ${AP.relax}/3)`, "gold-t"); }
+  }
+  LS.set("ap", AP);
+}
+// ------------------------------------------------------------------ presets
+// Scalping: short 5-minute ranges, frequent scans, small fixed take +0.5% and stop -1% from the entry.
+const SCALP = {
+  scalp: true, tf: 5, lookback: 24, minWidth: 0.3, maxWidth: 2, squeeze: 35, maxEr: 0.45,
+  slMode: "pct", slPct: 1, tpPct: 0.5, beR: 0, trailR: 0, expiryH: 1, cooldownMin: 20, scanMin: 1,
+  maxSetups: 6, coins: 80, dipMode: "off", mode: "breakout",
+};
+function applyPreset(name) {
+  if (name === "scalp") {
+    if (!CFG.scalp) LS.set("preScalp", Object.fromEntries(Object.keys(SCALP).map(k => [k, CFG[k]])));
+    Object.assign(CFG, SCALP);
+    log("⚡ Скальпінг: тейк +" + CFG.tpPct + "%, стоп −" + CFG.slPct + "%, діапазони на " + CFG.tf + "-хв свічках, скан щохвилини", "gold-t");
+  } else {
+    const prev = LS.get("preScalp", null);
+    if (prev) Object.assign(CFG, prev); else Object.assign(CFG, { scalp: false, tpPct: 0, slMode: "mid" });
+    CFG.scalp = false;
+    log("Скальпінг вимкнено, повернено попередні налаштування", "mute");
+  }
+  LS.set("settings", CFG); buildSettings(); paintMode(); paintAuto(); lastScan = 0;
+  AP.relax = 0; AP.dry = 0; LS.set("ap", AP);
+  if (RUN) loop();
+}
+window.applyPreset = applyPreset;
+$("btn-scalp").onclick = () => applyPreset(CFG.scalp ? "normal" : "scalp");
+function paintAuto() {
+  const sc = $("btn-scalp");
+  if (sc) { sc.textContent = CFG.scalp ? `⚡ Скальпінг: +${CFG.tpPct}% / −${CFG.slPct}%` : "⚡ Скальпінг: вимк"; sc.className = CFG.scalp ? "gold" : ""; }
+  const b = $("btn-auto");
+  b.textContent = CFG.autopilot ? "🤖 Автопілот: увімк" : "🤖 Автопілот: вимк";
+  b.className = CFG.autopilot ? "green" : "";
+}
+async function startRun() {
+  saveKeys();
+  try { await syncTime(); await bx("/v5/account/wallet-balance", { query: { accountType: "UNIFIED" }, auth: true }); }
+  catch (e) { showErr(e.message); log("Не запущено: " + e.message, "down"); return false; }
+  setRun(true); lastScan = 0; log("Бот запущено", "up"); loop();
+  return true;
+}
+$("btn-auto").onclick = async () => {
+  CFG.autopilot = !CFG.autopilot; LS.set("settings", CFG); paintAuto();
+  if (CFG.autopilot) {
+    log("🤖 Автопілот увімкнено: пробої + ракети кожні " + CFG.scanMin + " хв, нові заявки без вашої участі, доки не вимкнете", "up");
+    if (!RUN) { if (!(await startRun())) { CFG.autopilot = false; LS.set("settings", CFG); paintAuto(); } }
+    else { lastScan = 0; loop(); }
+  } else log("Автопілот вимкнено: бот працює в звичайному режимі (кнопка «Зупинити» — повна зупинка)", "mute");
+};
+function autoInfo() {
+  if (!CFG.autopilot || !RUN) return "";
+  const next = Math.max(0, Math.round((lastScan + CFG.scanMin * 60e3 - Date.now()) / 1000));
+  return `🤖 автопілот · наступний скан через ${next} с · нових сетапів ${AP.added}` + (AP.relax ? ` · фільтри послаблено ${AP.relax}/3` : "");
+}
+setInterval(() => { const t = autoInfo(); if ($("auto-info")) $("auto-info").textContent = t; }, 1000);
+
+async function loop() {
+  if (!RUN || busy) return;
+  busy = true;
+  try {
+    await manage();
+    if (Date.now() - lastScan >= CFG.scanMin * 60e3) {
+      lastScan = Date.now();
+      if (CFG.autopilot) await autopilotScan();
+      else if (CFG.mode === "rocket") await scanRocket(true); else await scan();
+    }
+    showErr("");
+  } catch (e) { showErr(e.message); log(e.message, "down"); }
+  finally { busy = false; render(); }
+}
+function setRun(on) {
+  RUN = on; LS.set("running", on);
+  $("run-pill").classList.toggle("on", on);
+  $("run-text").textContent = on ? "Працює" : "Зупинено";
+  $("btn-start").disabled = on;
+}
+$("btn-start").onclick = () => startRun();
+$("btn-stop").onclick = async () => {
+  if (!confirm("Зупинити бота і зняти всі його Buy/Sell Stop ордери?\nСітки на відкат теж буде знято. Відкриті позиції лишаться зі своїми стоп-лосом і тейк-профітом.")) return;
+  setRun(false);
+  if (CFG.autopilot) { CFG.autopilot = false; LS.set("settings", CFG); paintAuto(); }
+  for (const s of [...SETUPS]) {
+    if (s.state !== "armed") { try { await cancelDip(s); if (s.dip) s.dip.levels = []; } catch (e) { log(`${s.symbol}: ${e.message}`, "down"); } continue; }
+    try { await cancelAll(s); SETUPS = SETUPS.filter(x => x !== s); }
+    catch (e) { log(`${s.symbol}: ${e.message}`, "down"); }
+  }
+  saveSetups(); render(); log("Бот зупинено, стоп-ордери знято", "mute");
+};
+$("btn-test").onclick = async () => {
+  saveKeys();
+  $("test-out").textContent = "Перевіряю…";
+  try {
+    await syncTime();
+    const w = await bx("/v5/account/wallet-balance", { query: { accountType: "UNIFIED" }, auth: true });
+    const a = (w.list || [])[0] || {};
+    $("test-out").innerHTML = `<span class="up">Підключено.</span> Капітал ${Number(a.totalEquity || 0).toFixed(2)} USDT, вільно ${Number(a.totalAvailableBalance || 0).toFixed(2)} USDT`;
+    $("hdr-sub").textContent = `${$("k-env").value} · капітал ${Number(a.totalEquity || 0).toFixed(2)} USDT`;
+  } catch (e) { $("test-out").innerHTML = `<span class="down">${esc(e.message)}</span>`; }
+};
+function saveKeys() {
+  const data = { key: $("k-key").value.trim(), secret: $("k-secret").value.trim(), env: $("k-env").value };
+  try { sessionStorage.setItem("bx.keys", JSON.stringify(data)); } catch {}
+  if ($("k-remember").value === "1") LS.set("keys", data); else LS.del("keys");
+  LS.set("env", data.env);
+}
+function loadKeys() {
+  let k = LS.get("keys", null);
+  if (k) $("k-remember").value = "1";
+  try { k = k || JSON.parse(sessionStorage.getItem("bx.keys") || "null"); } catch {}
+  if (k) { $("k-key").value = k.key || ""; $("k-secret").value = k.secret || ""; }
+  $("k-env").value = (k && k.env) || LS.get("env", "mainnet");
+}
+
+// ------------------------------------------------------------------ exchange view (independent of RUN)
+let EXORD = [], exAt = 0, exBusy = false;
+async function refreshExchange(force) {
+  if (exBusy || (!force && Date.now() - exAt < 15000)) return;
+  if (!$("k-key").value.trim() || !$("k-secret").value.trim()) { $("ex-info").textContent = "впишіть ключі"; return; }
+  exBusy = true;
+  try {
+    const all = [];
+    for (const filter of ["Order", "StopOrder"]) {
+      let cursor = "";
+      for (let i = 0; i < 6; i++) {
+        const q = { category: "linear", settleCoin: "USDT", orderFilter: filter, limit: "50" };
+        if (cursor) q.cursor = cursor;
+        const r = await bx("/v5/order/realtime", { query: q, auth: true });
+        all.push(...(r.list || []));
+        cursor = r.nextPageCursor || "";
+        if (!cursor) break;
+      }
+    }
+    const seen = new Set();
+    EXORD = all.filter(o => !seen.has(o.orderId) && seen.add(o.orderId));
+    if (!RUN) {
+      const posRes = await bx("/v5/position/list", { query: { category: "linear", settleCoin: "USDT", limit: "200" }, auth: true });
+      POS = (posRes.list || []).filter(p => Number(p.size) > 0);
+    }
+    exAt = Date.now();
+    $("ex-info").textContent = `ордерів ${EXORD.length} · позицій ${POS.length} · ${new Date().toLocaleTimeString()}`;
+  } catch (e) { $("ex-info").textContent = "не вдалося: " + e.message; }
+  finally { exBusy = false; renderExchange(); }
+}
+function owner(o) {
+  const id = String(o.orderLinkId || "");
+  const mine = SETUPS.some(s => id && JSON.stringify(s).includes(id));
+  if (mine) return '<span class="up">цей бот</span>';
+  if (/^b[xgn]/.test(id)) return '<span style="color:var(--gold)" title="Ордер proboystrategy, якого немає в сетапах цієї сторінки: імпортуйте сетапи зі старого браузера">proboy, не в сетапах</span>';
+  if (/^g[xwT]/.test(id)) return '<span class="mute">сітковий бот</span>';
+  return '<span class="mute">вручну / інше</span>';
+}
+function renderExchange() {
+  if (!$("ex-orders")) return;
+  const rows = EXORD.slice().sort((a, b) => a.symbol.localeCompare(b.symbol) || Number(b.price || b.triggerPrice) - Number(a.price || a.triggerPrice));
+  $("ex-orders").innerHTML = rows.length ? rows.map(o => `<tr><td><b>${esc(o.symbol)}</b></td><td class="${o.side === "Buy" ? "up" : "down"}">${o.side}</td>
+    <td>${esc(o.stopOrderType && o.stopOrderType !== "UNKNOWN" ? o.stopOrderType : "")} ${esc(o.orderType)}</td>
+    <td>${Number(o.triggerPrice) ? "тригер " + o.triggerPrice + (Number(o.price) ? " → " + o.price : "") : o.price}</td>
+    <td>${o.qty}</td><td>${o.reduceOnly ? "так" : ""}</td><td>${owner(o)}</td><td>${tm(Number(o.createdTime))}</td></tr>`).join("")
+    : `<tr><td colspan="8" class="mute">${exAt ? "Відкритих ордерів немає" : "Завантажую…"}</td></tr>`;
+}
+const XFER_KEYS = ["settings", "setups", "journal", "cool", "radarLog", "radarAuto", "radarPlace", "radarCfg", "mode", "tab"];
+$("btn-export").onclick = async () => {
+  const out = {};
+  for (const k of XFER_KEYS) { const v = LS.get(k, undefined); if (v !== undefined) out[k] = v; }
+  out.running = RUN;
+  const text = JSON.stringify({ proboy: 1, at: Date.now(), data: out });
+  $("xfer").value = text;
+  try { await navigator.clipboard.writeText(text); $("xfer-out").textContent = `Скопійовано (сетапів ${(out.setups || []).length}, угод у журналі ${(out.journal || []).length})`; }
+  catch { $("xfer-out").textContent = "Виділіть текст нижче і скопіюйте"; }
+};
+$("btn-import").onclick = () => {
+  let pack;
+  try { pack = JSON.parse($("xfer").value.trim()); } catch { $("xfer-out").textContent = "Це не текст експорту"; return; }
+  if (!pack || pack.proboy !== 1 || !pack.data) { $("xfer-out").textContent = "Це не текст експорту proboystrategy"; return; }
+  const d = pack.data;
+  // setups: add the ones this page does not have yet (same symbol = already managed here)
+  const add = (d.setups || []).filter(s => !SETUPS.some(x => x.symbol === s.symbol));
+  SETUPS = SETUPS.concat(add); saveSetups();
+  const ids = new Set(JOURNAL.map(j => j.symbol + "|" + j.closedAt));
+  JOURNAL = JOURNAL.concat((d.journal || []).filter(j => !ids.has(j.symbol + "|" + j.closedAt))).sort((a, b) => (a.closedAt || 0) - (b.closedAt || 0));
+  LS.set("journal", JOURNAL);
+  COOL = Object.assign({}, d.cool || {}, COOL); LS.set("cool", COOL);
+  if (d.settings) { CFG = Object.assign(CFG, d.settings); LS.set("settings", CFG); buildSettings(); }
+  for (const k of ["radarLog", "radarAuto", "radarPlace", "radarCfg"]) if (d[k] !== undefined) LS.set(k, d[k]);
+  if (d.radarLog) RADARLOG = d.radarLog;
+  $("xfer").value = "";
+  $("xfer-out").textContent = `Імпортовано: сетапів ${add.length}, угод ${(d.journal || []).length}, налаштування ${d.settings ? "так" : "ні"}.` + (RUN ? "" : " Натисніть «Запустити бота», щоб сервер їх супроводжував.");
+  log(`Імпорт зі старого браузера: сетапів ${add.length}`, "up");
+  render(); refreshExchange(true);
+};
+setInterval(() => refreshExchange(false), 5000);
+
+// ------------------------------------------------------------------ render
+const fx = (v, d = 4) => v == null || v === "" || Number.isNaN(Number(v)) ? "—" : (Number(v) > 0 ? "+" : "") + Number(v).toFixed(d);
+const tm = (t) => t ? new Date(t).toLocaleString([], { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : "—";
+function dur(a, b) { const m = Math.max(0, (b - a) / 60000); return m < 60 ? Math.round(m) + " хв" : (m / 60).toFixed(1) + " год"; }
+function render() {
+  $("setups").innerHTML = SETUPS.length ? SETUPS.map((s, i) => {
+    const tag = s.state === "armed" ? `<span class="tag armed">${s.now ? "⚡ чекає виконання ліміту" : "чекає пробою"}</span>` : `<span class="tag ${s.state}">${s.state === "long" ? "LONG" : "SHORT"}${s.beDone ? " · БЗ" : ""}${s.trailOn ? " · трейл" : ""}</span>`
+      + (s.dip && s.dip.levels && s.dip.levels.length ? ` <span class="tag armed" title="рівні: ${s.dip.levels.map(l => l.price + (l.state === "bounce" ? "✓" : "")).join(", ")}">🪜 ${s.dip.levels.filter(l => l.state === "bounce").length}/${s.dip.levels.filter(l => l.state !== "dead").length} · циклів ${s.dip.cycles}</span>` : "");
+    const leg = (s.state === "short" ? s.sell : s.buy) || legsOf(s)[0];
+    return `<tr><td><b>${s.kind === "rocket" ? "🚀 " : ""}${esc(s.symbol)}</b>${s.score != null ? ` <span class="mute">${s.score}</span>` : ""}</td><td>${tag}</td>
+      <td>${s.lo} – ${s.hi} <span class="mute">${s.width.toFixed(2)}%</span></td>
+      <td class="${s.state === "short" ? "mute" : "up"}">${s.buy ? s.buy.trigger : "—"}</td><td class="${s.state === "long" ? "mute" : "down"}">${s.sell ? s.sell.trigger : "—"}</td>
+      <td>${leg.sl} / ${leg.tp}</td><td>${leg.riskPct.toFixed(2)}% · ${(leg.riskPct * s.lev).toFixed(0)}% маржі</td>
+      <td>${s.state === "armed" ? tm(s.expiresAt) : "—"}</td>
+      <td style="white-space:nowrap">${s.state === "armed" ? (s.now ? "" : `<button data-nowl="${i}" class="green" style="min-height:30px" title="не чекати пробою">⚡ Лонг</button> <button data-nows="${i}" class="red" style="min-height:30px" title="не чекати пробою">⚡ Шорт</button> `) + `<button data-cancel="${i}" style="min-height:30px">Зняти</button>` : ""}</td></tr>`;
+  }).join("") : `<tr><td colspan="9" class="mute">Немає сетапів. Запустіть бота — він знайде монети у стисненні й поставить стоп-ордери.</td></tr>`;
+  $("setups").querySelectorAll("[data-nowl],[data-nows]").forEach(b => b.onclick = () => {
+    const st = SETUPS[Number(b.dataset.nowl ?? b.dataset.nows)];
+    nowClick(b, st.symbol, b.dataset.nowl != null ? "Buy" : "Sell", { score: st.score, reasons: st.reasons }, { kind: st.kind === "rocket" ? "rocket" : "now", tpR: st.kind === "rocket" ? CFG.rocketTpR : CFG.tpR });
+  });
+  $("setups").querySelectorAll("[data-cancel]").forEach(b => b.onclick = async () => {
+    const s = SETUPS[Number(b.dataset.cancel)];
+    try { await cancelAll(s); SETUPS = SETUPS.filter(x => x !== s); COOL[s.symbol] = Date.now() + CFG.cooldownMin * 60e3; saveSetups(); log(`${s.symbol}: сетап знято вручну`, "mute"); render(); }
+    catch (e) { log(e.message, "down"); }
+  });
+  renderExchange();
+  $("positions").innerHTML = POS.length ? POS.map(p => `<tr><td><b>${esc(p.symbol)}</b></td><td class="${p.side === "Buy" ? "up" : "down"}">${p.side === "Buy" ? "LONG" : "SHORT"}</td>
+    <td>${p.size}</td><td>${p.avgPrice}</td><td>${p.markPrice}</td><td class="${Number(p.unrealisedPnl) >= 0 ? "up" : "down"}">${fx(p.unrealisedPnl)}</td>
+    <td>${p.stopLoss || "—"}</td><td>${p.takeProfit || "—"}</td><td>${Number(p.trailingStop) ? p.trailingStop : "—"}</td><td>${p.liqPrice || "—"}</td></tr>`).join("")
+    : `<tr><td colspan="10" class="mute">Відкритих позицій немає</td></tr>`;
+  const trades = JOURNAL.filter(j => !j.noTrade);
+  const wins = trades.filter(t => t.pnl > 0), losses = trades.filter(t => t.pnl < 0);
+  const sum = (a) => a.reduce((x, t) => x + Number(t.pnl || 0), 0);
+  const pf = losses.length ? sum(wins) / Math.abs(sum(losses)) : (wins.length ? Infinity : null);
+  let cum = 0, peak = 0, dd = 0;
+  trades.forEach(t => { cum += Number(t.pnl || 0); peak = Math.max(peak, cum); dd = Math.max(dd, peak - cum); });
+  const avgR = trades.length ? trades.reduce((a, t) => a + Number(t.r || 0), 0) / trades.length : 0;
+  const k = [
+    ["Угод", trades.length], ["PnL, USDT", fx(sum(trades))], ["Win rate", trades.length ? (wins.length / trades.length * 100).toFixed(1) + "%" : "—"],
+    ["Profit factor", pf == null ? "—" : pf === Infinity ? "∞" : pf.toFixed(2)], ["Сер. R", fx(avgR, 2)],
+    ["Сер. плюс", fx(wins.length ? sum(wins) / wins.length : 0)], ["Сер. мінус", fx(losses.length ? sum(losses) / losses.length : 0)],
+    ["Макс. просадка", fx(-dd)], ["Без пробою", JOURNAL.filter(j => j.noTrade).length],
+    ["Тейків / стопів", `${trades.filter(t => t.result === "Тейк-профіт").length} / ${trades.filter(t => t.result === "Стоп-лос").length}`],
+  ];
+  $("kpis").innerHTML = k.map(([n, v]) => `<div class="kpi"><span>${n}</span><b>${v}</b></div>`).join("");
+  $("journal").innerHTML = JOURNAL.length ? JOURNAL.slice().reverse().slice(0, 200).map(t => `<tr>
+    <td>${tm(t.closedAt)}</td><td title="${esc(t.why || "")}"><b>${t.kind === "rocket" ? "🚀 " : ""}${esc(t.symbol)}</b>${t.score != null ? ` <span class="mute">${t.score}</span>` : ""}</td><td class="${t.side === "LONG" ? "up" : t.side === "SHORT" ? "down" : "mute"}">${t.side}</td>
+    <td>${t.entry ?? "—"}</td><td>${t.exit ?? "—"}</td><td>${esc(t.result)}${t.dipFills ? ` <span class="mute">· 🪜 ${t.dipFills} докупок, ${t.dipCycles} відскоків</span>` : ""}</td><td>${t.noTrade ? "—" : fx(t.r, 2)}${t.maxR ? ` <span class="mute">(макс ${t.maxR})</span>` : ""}</td>
+    <td class="${t.pnl > 0 ? "up" : t.pnl < 0 ? "down" : "mute"}">${t.noTrade ? "—" : fx(t.pnl)}</td><td>${t.openedAt ? dur(t.openedAt, t.closedAt) : "—"}</td>
+    <td class="mute">${t.width ? t.width.toFixed(2) + "% · BB " + Math.round(t.squeeze) + " · ER " + Number(t.er).toFixed(2) : "—"}</td></tr>`).join("")
+    : `<tr><td colspan="10" class="mute">Угод ще не було</td></tr>`;
+}
+$("btn-csv").onclick = () => {
+  const cols = ["closedAt", "openedAt", "kind", "score", "why", "symbol", "side", "entry", "exit", "result", "r", "maxR", "pnl", "width", "squeeze", "er", "lev", "dipFills", "dipCycles"];
+  const lines = [cols.join(",")].concat(JOURNAL.map(t => cols.map(c => {
+    let v = t[c]; if ((c === "closedAt" || c === "openedAt") && v) v = new Date(v).toISOString();
+    v = v ?? ""; return /[",\n]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : v;
+  }).join(",")));
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob(["﻿" + lines.join("\n")], { type: "text/csv" }));
+  a.download = "breakout-trades.csv"; a.click();
+};
+$("btn-clear-j").onclick = () => { if (confirm("Очистити журнал угод у цьому браузері?")) { JOURNAL = []; LS.set("journal", JOURNAL); render(); } };
+
+// ------------------------------------------------------------------ start
+buildSettings();
+buildRadarSettings();
+paintRadarButtons();
+renderRadarLog();
+if (LS.get("tab", "bot") === "radar") document.querySelector('.tabs [data-tab="radar"]').click();
+setTimeout(checkRadarLog, 2000);
+paintMode();
+paintAuto();
+loadKeys();
+render();
+setRun(RUN);
+if (RUN) { log("Бот продовжує роботу після перезавантаження сторінки", "mute"); loop(); }
+setInterval(loop, 10000);
+if (!window.crypto || !crypto.subtle) showErr("Цей браузер не підтримує підпис запитів (crypto.subtle). Відкрийте файл у Chrome або Edge.");
+</script>
+</body>
+</html>

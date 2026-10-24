@@ -1,0 +1,9 @@
+{
+  "name": "proboy-autopilot",
+  "private": true,
+  "description": "Bybit bot 24/7 on a server: one button start/stop, one button scalping",
+  "main": "server.js",
+  "scripts": { "start": "node server.js" },
+  "engines": { "node": ">=20" },
+  "dependencies": { "jsdom": "24.1.3" }
+}
