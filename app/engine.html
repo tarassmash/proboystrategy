@@ -274,6 +274,10 @@ const FIELDS = [
   ["expiryH", "Чекати пробій, год", 6, 0.5, 72, false, "далі ордери знімаються"],
   ["cooldownMin", "Пауза по монеті, хв", 120, 0, 10080, true, "після угоди або закінчення"],
   ["scanMin", "Скан кожні, хв", 5, 1, 120, true, ""],
+  ["chase", "Ловити імпульс", "on", null, null, null, "on|off"],
+  ["chaseAt", "Імпульс: старт, частка шляху до тейку", 0.7, 0.3, 0.95, false, "коли ціна пройшла стільки шляху до тейку"],
+  ["chaseGap", "Імпульс: стоп позаду ціни, × тейку", 0.4, 0.1, 1, false, "менше = ближче стоп, більше закриє раніше"],
+  ["chaseStep", "Імпульс: тейк далі на, × тейку", 0.5, 0.1, 3, false, "на скільки відсувати тейк уперед"],
   ["refreshMin", "Оновлювати заявки кожні, хв", 5, 0, 60, true, "переставляє стоп-ордери на свіжі межі діапазону; 0 — вимкнено"],
   ["maxMode", "Кількість заявок", "balance", null, null, null, "balance|fixed"],
   ["orderType", "Тип ордера", "Limit", null, null, null, "Limit|Market"],
@@ -285,6 +289,7 @@ const SELECTS = {
   slMode: [["mid", "Середина діапазону"], ["edge", "Протилежна межа"], ["atr", "Від тригера × ATR"], ["pct", "% від входу"]],
   orderType: [["Limit", "Стоп-ліміт"], ["Market", "Стоп-маркет"]],
   maxMode: [["balance", "Максимум за балансом (до 30)"], ["fixed", "Як «Макс. сетапів»"]],
+  chase: [["on", "Так: тягнути стоп і тейк за рухом"], ["off", "Ні: фіксований тейк"]],
   triggerBy: [["LastPrice", "Остання ціна"], ["MarkPrice", "Марк-ціна"]],
 };
 const LS = {
@@ -1137,6 +1142,8 @@ function exitReason(s, exitPx) {
   const cands = [["Тейк-профіт", Number(leg.tp)], ["Стоп-лос", Number(leg.sl)]];
   if (s.beDone) cands.push(["Беззбиток", Number(s.entry)]);
   if (s.trailOn) cands.push(["Трейлінг", null]);
+  if (s.chaseSl) cands.push(["Стоп за імпульсом", s.chaseSl]);
+  if (s.tpCur) cands.push(["Тейк (відсунутий)", s.tpCur]);
   let best = "Закрито", d = Infinity;
   for (const [name, px] of cands) {
     if (px == null) continue;
@@ -1247,7 +1254,36 @@ async function manage() {
           s.beDone = true; log(`${s.symbol}: +${r.toFixed(2)}R — стоп у беззбиток ${be}`, "up");
         } catch (e) { log(`${s.symbol}: беззбиток не вдався: ${e.message}`, "down"); }
       }
-      if (CFG.trailR > 0 && !s.trailOn && r >= CFG.trailR) {
+      // ---- ride the impulse: once the price covered chaseAt of the way to the take, the stop follows the price
+      // (never moves back) and the take is pushed further ahead, so a strong move is not cut by a fixed take
+      if (CFG.chase !== "off") {
+        const D = s.chaseD || Math.abs(Number(leg.tp) - entry);
+        s.chaseD = D;
+        const tpNow = Number(pos.takeProfit) || Number(s.tpCur || leg.tp);
+        const gone = long ? mark - entry : entry - mark;
+        if (D > 0 && gone >= CFG.chaseAt * D) {
+          const body = { category: "linear", symbol: s.symbol, tpslMode: "Full", positionIdx: idx, slTriggerBy: "MarkPrice", tpTriggerBy: "LastPrice" };
+          const want = long ? mark - CFG.chaseGap * D : mark + CFG.chaseGap * D;
+          const curSl = Number(pos.stopLoss) || 0;
+          // move the stop only forward and by a noticeable step (10% of the take distance) to save requests
+          if (!curSl || (long ? want - curSl : curSl - want) >= 0.1 * D) body.stopLoss = align(want, sp.tick, long ? false : true);
+          const left = long ? tpNow - mark : mark - tpNow;
+          let newTp = null;
+          if (left <= (1 - CFG.chaseAt) * D) newTp = long ? tpNow + CFG.chaseStep * D : tpNow - CFG.chaseStep * D;
+          if (newTp) body.takeProfit = align(newTp, sp.tick, long);
+          if (body.stopLoss || body.takeProfit) {
+            try {
+              await bx("/v5/position/trading-stop", { method: "POST", auth: true, body });
+              s.chaseN = (s.chaseN || 0) + 1;
+              if (body.stopLoss) { s.chaseSl = Number(body.stopLoss); s.beDone = true; }
+              if (body.takeProfit) s.tpCur = Number(body.takeProfit);
+              s.maxGain = Math.max(s.maxGain || 0, gone / entry * 100);
+              log(`${s.symbol}: 🚀 імпульс +${(gone / entry * 100).toFixed(2)}% —` + (body.stopLoss ? ` стоп → ${body.stopLoss}` : "") + (body.takeProfit ? ` · тейк → ${body.takeProfit}` : ""), "up");
+            } catch (e) { if (!/not modified/i.test(e.message)) log(`${s.symbol}: супровід імпульсу: ${e.message}`, "down"); }
+          }
+        }
+      }
+      if (CFG.chase === "off" && CFG.trailR > 0 && !s.trailOn && r >= CFG.trailR) {
         const dist = align(risk * CFG.trailDist, sp.tick, true);
         try {
           await bx("/v5/position/trading-stop", { method: "POST", auth: true, body: { category: "linear", symbol: s.symbol, trailingStop: dist, tpslMode: "Full", positionIdx: idx } });
