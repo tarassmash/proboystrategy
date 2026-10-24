@@ -55,7 +55,12 @@ dom = new JSDOM(PAGE, {
   virtualConsole: vc,
   beforeParse(window) {
     for (const [k, v] of Object.entries(saved)) { try { window.localStorage.setItem(k, v); } catch {} }
-    window.fetch = (...a) => fetch(...a);
+    // TEST_BYBIT_URL: send the page's Bybit requests to a test server (used for automated checks only)
+    const testUrl = (process.env.TEST_BYBIT_URL || "").trim();
+    window.fetch = (input, init) => {
+      if (testUrl && typeof input === "string") input = input.replace(/^https:\/\/api(-testnet)?\.bybit\.com/, testUrl);
+      return fetch(input, init);
+    };
     window.Headers = Headers; window.Request = Request; window.Response = Response;
     window.AbortController = AbortController;
     Object.defineProperty(window, "crypto", { value: webcrypto, configurable: true });
@@ -73,6 +78,25 @@ for (const sig of ["SIGTERM", "SIGINT"]) process.on(sig, () => { try { dumpStora
 process.on("unhandledRejection", (e) => log("unhandled:", e && (e.message || e)));
 process.on("uncaughtException", (e) => log("uncaught:", e && (e.stack || e.message || e)));
 log(`page started · storage ${STORE} · keys from env: ${process.env.BYBIT_API_KEY ? "yes" : "no"}`);
+
+// ---------------- is Bybit reachable from this server? ----------------
+const NET = { text: "Bybit: перевіряю…", ok: null };
+async function checkBybit() {
+  const env = (() => { try { return JSON.parse(dom.window.localStorage.getItem("bx.env") || '"mainnet"'); } catch { return "mainnet"; } })();
+  const host = (process.env.TEST_BYBIT_URL || "").trim() || (env === "testnet" ? "https://api-testnet.bybit.com" : "https://api.bybit.com");
+  try {
+    const r = await fetch(host + "/v5/market/time", { signal: AbortSignal.timeout(15000) });
+    const j = await r.json().catch(() => null);
+    if (r.ok && j && j.retCode === 0) { NET.ok = true; NET.text = `Bybit ${env}: зв'язок є`; }
+    else if (r.status === 403 || r.status === 451) {
+      NET.ok = false;
+      NET.text = `Bybit блокує регіон цього сервера (HTTP ${r.status}). Railway → сервіс → Settings → Region → Europe West або Southeast Asia, не US.`;
+    } else { NET.ok = false; NET.text = `Bybit відповів HTTP ${r.status}`; }
+  } catch (e) { NET.ok = false; NET.text = "Немає зв'язку з Bybit: " + (e.message || e); }
+  log(NET.text);
+}
+setTimeout(checkBybit, 1000);
+setInterval(checkBybit, 10 * 60000);
 
 // ---------------- snapshot of the live page ----------------
 const doc = () => dom.window.document;
@@ -131,7 +155,7 @@ async function act(p) {
 // ---------------- remote page ----------------
 const VIEWER = `
 <div id="__remote" style="position:fixed;left:0;right:0;bottom:0;z-index:99999;padding:6px 12px;font:12px system-ui;background:#161a1e;color:#848e9c;border-top:1px solid #2b3139;display:flex;gap:10px;justify-content:space-between">
-  <span>Сервер · бот працює 24/7 навіть із закритою сторінкою</span><span id="__rs">…</span>
+  <span>Сервер · бот працює 24/7 навіть із закритою сторінкою · <b id="__net"></b></span><span id="__rs">…</span>
 </div>
 <script>
 (function () {
@@ -175,6 +199,8 @@ const VIEWER = `
     if (!force && a && ["INPUT", "SELECT", "TEXTAREA"].includes(a.tagName) && a !== document.body) return; // do not disturb typing
     try {
       const r = await fetch("/__snapshot").then(x => x.json());
+      const n = document.getElementById("__net");
+      if (n) { n.textContent = r.net.text; n.style.color = r.net.ok === false ? "#f6465d" : r.net.ok ? "#0ecb81" : ""; }
       const keep = document.getElementById("__remote");
       const y = window.scrollY;
       const open = [...document.querySelectorAll("details[open]")].map(pathOf).map(String);
@@ -208,12 +234,13 @@ http.createServer(async (req, res) => {
   const url = new URL(req.url, "http://x");
   const send = (code, body, type) => { res.writeHead(code, { "Content-Type": type, "Cache-Control": "no-store" }); res.end(body); };
   if (url.pathname === "/healthz") return send(200, "ok", "text/plain");
+  if (url.pathname === "/__net") return send(200, JSON.stringify(NET), "application/json; charset=utf-8");
   if (!authorised(req)) {
     res.writeHead(401, { "WWW-Authenticate": 'Basic realm="proboystrategy"' });
     return res.end("Потрібен пароль (UI_PASSWORD)");
   }
   try {
-    if (url.pathname === "/__snapshot") return send(200, JSON.stringify({ body: snapshot() }), "application/json; charset=utf-8");
+    if (url.pathname === "/__snapshot") return send(200, JSON.stringify({ body: snapshot(), net: NET }), "application/json; charset=utf-8");
     if (url.pathname === "/__act" && req.method === "POST") {
       if (!PASSWORD) return send(200, JSON.stringify({ ok: false, error: "Лише перегляд: задайте UI_PASSWORD" }), "application/json");
       let raw = "";

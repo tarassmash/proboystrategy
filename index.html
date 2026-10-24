@@ -363,6 +363,10 @@ async function bx(path, { method = "GET", query = null, body = null, auth = fals
       : "Немає зв'язку з Bybit: " + e.message);
   }
   const json = await res.json().catch(() => ({}));
+  if ((res.status === 403 || res.status === 451) && json.retCode === undefined) {
+    // Bybit (CloudFront) refuses the whole country of this server or browser
+    throw new BybitErr("HTTP " + res.status + ": Bybit блокує країну, з якої йде запит. На Railway: сервіс → Settings → Region → Europe West (Amsterdam) або Southeast Asia (Singapore), не US. У браузері — вимкніть VPN США.", 403);
+  }
   if (json.retCode === 10002 && retry) { await syncTime(); return bx(path, { method, query, body, auth }, false); }
   if (json.retCode !== 0) throw new BybitErr((json.retMsg || ("HTTP " + res.status)) + (json.retCode ? ` (${json.retCode})` : ""), json.retCode);
   return json.result || {};
