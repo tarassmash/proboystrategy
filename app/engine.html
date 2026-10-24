@@ -274,6 +274,8 @@ const FIELDS = [
   ["expiryH", "Чекати пробій, год", 6, 0.5, 72, false, "далі ордери знімаються"],
   ["cooldownMin", "Пауза по монеті, хв", 120, 0, 10080, true, "після угоди або закінчення"],
   ["scanMin", "Скан кожні, хв", 5, 1, 120, true, ""],
+  ["refreshMin", "Оновлювати заявки кожні, хв", 5, 0, 60, true, "переставляє стоп-ордери на свіжі межі діапазону; 0 — вимкнено"],
+  ["maxMode", "Кількість заявок", "balance", null, null, null, "balance|fixed"],
   ["orderType", "Тип ордера", "Limit", null, null, null, "Limit|Market"],
   ["triggerBy", "Тригер за ціною", "LastPrice", null, null, null, "LastPrice|MarkPrice"],
 ];
@@ -282,6 +284,7 @@ const SELECTS = {
   rocketSides: [["long", "Лише лонг (вгору)"], ["both", "Обидва боки"]],
   slMode: [["mid", "Середина діапазону"], ["edge", "Протилежна межа"], ["atr", "Від тригера × ATR"], ["pct", "% від входу"]],
   orderType: [["Limit", "Стоп-ліміт"], ["Market", "Стоп-маркет"]],
+  maxMode: [["balance", "Максимум за балансом (до 30)"], ["fixed", "Як «Макс. сетапів»"]],
   triggerBy: [["LastPrice", "Остання ціна"], ["MarkPrice", "Марк-ціна"]],
 };
 const LS = {
@@ -1275,7 +1278,19 @@ async function manage() {
 // the filters are relaxed step by step (max 3 steps) so new orders keep appearing; reset after a hit.
 let AP = Object.assign({ dry: 0, relax: 0, last: 0, added: 0 }, LS.get("ap", {}));
 const RELAX_KEYS = ["squeeze", "maxEr", "maxWidth", "rocketScore"];
+// how many setups the balance allows: every armed pair may turn into a position with CFG.margin
+async function balanceSlots() {
+  try {
+    const w = await bx("/v5/account/wallet-balance", { query: { accountType: "UNIFIED" }, auth: true });
+    const a = (w.list || [])[0] || {};
+    const free = Number(a.totalAvailableBalance || 0), inPos = POS.length;
+    AP.free = free;
+    return Math.max(1, Math.min(30, inPos + Math.floor(free * 0.9 / Math.max(1, CFG.margin))));
+  } catch (e) { return CFG.maxSetups; }
+}
 async function autopilotScan() {
+  const fixedMax = CFG.maxSetups;
+  if (CFG.maxMode !== "fixed") { AP.slots = await balanceSlots(); CFG.maxSetups = AP.slots; } else AP.slots = fixedMax;
   const base = Object.fromEntries(RELAX_KEYS.map(k => [k, CFG[k]]));
   const r = AP.relax || 0;
   if (r) {
@@ -1290,6 +1305,7 @@ async function autopilotScan() {
     if (RUN && !CFG.scalp && CFG.maxSetups - SETUPS.length > 0) await scanRocket(true);
   } finally { Object.assign(CFG, base); }
   const added = SETUPS.length - before, free = CFG.maxSetups - SETUPS.length;
+  CFG.maxSetups = fixedMax;
   AP.last = Date.now(); AP.added += Math.max(0, added);
   if (added > 0) { AP.dry = 0; if (AP.relax) { log(`Автопілот: знайдено ${added}, фільтри повернуто до звичайних`, "mute"); AP.relax = 0; } }
   else if (free > 0) {
@@ -1303,7 +1319,7 @@ async function autopilotScan() {
 const SCALP = {
   scalp: true, tf: 5, lookback: 24, minWidth: 0.3, maxWidth: 2, squeeze: 35, maxEr: 0.45,
   slMode: "pct", slPct: 1, tpPct: 0.5, beR: 0, trailR: 0, expiryH: 1, cooldownMin: 20, scanMin: 1,
-  maxSetups: 6, coins: 80, dipMode: "off", mode: "breakout",
+  maxSetups: 6, coins: 80, dipMode: "off", mode: "breakout", maxMode: "balance", refreshMin: 5,
 };
 function applyPreset(name) {
   if (name === "scalp") {
@@ -1322,6 +1338,40 @@ function applyPreset(name) {
 }
 window.applyPreset = applyPreset;
 $("btn-scalp").onclick = () => applyPreset(CFG.scalp ? "normal" : "scalp");
+// ------------------------------------------------------------------ refresh armed setups
+// Every refreshMin minutes: a range that moved gets its Buy/Sell Stop re-placed at the new edges
+// (the slot and the original expiry are kept), a range that blew out or became too narrow is dropped.
+let lastRefresh = Date.now();
+async function refreshArmed() {
+  let moved = 0, dropped = 0, kept = 0;
+  for (const s of [...SETUPS]) {
+    if (!RUN) break;
+    if (s.state !== "armed" || s.now || POS.some(p => p.symbol === s.symbol)) continue;
+    let rows;
+    try { rows = await candles(s.symbol, 200); } catch (e) { continue; }
+    const last = rows[rows.length - 1].c;
+    const a = analyse(s.symbol, rows, last);
+    if (!a.hi) continue;
+    const sp = await spec(s.symbol);
+    const hi = align(a.hi, sp.tick, true), lo = align(a.lo, sp.tick, false);
+    const shift = Math.max(Math.abs(Number(hi) - Number(s.hi)), Math.abs(Number(lo) - Number(s.lo))) / last * 100;
+    if (shift < 0.05) { kept++; continue; }              // edges almost the same: leave the orders
+    if (last >= a.hi || last <= a.lo) { kept++; continue; } // price is at the edge right now: do not touch a breakout in progress
+    const bad = a.width < CFG.minWidth || a.width > CFG.maxWidth * 1.5;
+    try { await cancelAll(s); } catch (e) { log(`${s.symbol}: не вдалося зняти для оновлення: ${e.message}`, "down"); continue; }
+    SETUPS = SETUPS.filter(x => x !== s); saveSetups();
+    if (bad) { dropped++; log(`${s.symbol}: діапазон став ${a.width.toFixed(2)}% — сетап знято, слот вільний`, "mute"); continue; }
+    try {
+      const opts = s.kind === "rocket" ? { kind: "rocket", tpR: CFG.rocketTpR, sides: s.sell ? ["Buy", "Sell"] : ["Buy"] } : {};
+      if (s.score != null) { a.score = s.score; a.reasons = s.reasons; }
+      const msg = await arm(a, opts);
+      const n = SETUPS[SETUPS.length - 1];
+      if (n && n.symbol === s.symbol) { n.createdAt = s.createdAt; n.expiresAt = s.expiresAt; saveSetups(); moved++; }
+      log(`🔄 ${msg}`, "mute");
+    } catch (e) { log(`${s.symbol}: оновлення не вдалося: ${e.message}`, "down"); }
+  }
+  if (moved || dropped) log(`🔄 Оновлення заявок: переставлено ${moved}, знято ${dropped}, без змін ${kept}`, "gold-t");
+}
 function paintAuto() {
   const sc = $("btn-scalp");
   if (sc) { sc.textContent = CFG.scalp ? `⚡ Скальпінг: +${CFG.tpPct}% / −${CFG.slPct}%` : "⚡ Скальпінг: вимк"; sc.className = CFG.scalp ? "gold" : ""; }
@@ -1347,7 +1397,7 @@ $("btn-auto").onclick = async () => {
 function autoInfo() {
   if (!CFG.autopilot || !RUN) return "";
   const next = Math.max(0, Math.round((lastScan + CFG.scanMin * 60e3 - Date.now()) / 1000));
-  return `🤖 автопілот · наступний скан через ${next} с · нових сетапів ${AP.added}` + (AP.relax ? ` · фільтри послаблено ${AP.relax}/3` : "");
+  return `🤖 автопілот · наступний скан через ${next} с · заявок ${SETUPS.length} з ${AP.slots || CFG.maxSetups}${CFG.maxMode !== "fixed" ? " (за балансом)" : ""} · оновлення кожні ${CFG.refreshMin} хв · нових сетапів ${AP.added}` + (AP.relax ? ` · фільтри послаблено ${AP.relax}/3` : "");
 }
 setInterval(() => { const t = autoInfo(); if ($("auto-info")) $("auto-info").textContent = t; }, 1000);
 
@@ -1356,6 +1406,10 @@ async function loop() {
   busy = true;
   try {
     await manage();
+    if (CFG.refreshMin > 0 && Date.now() - lastRefresh >= CFG.refreshMin * 60e3) {
+      lastRefresh = Date.now();
+      await refreshArmed();
+    }
     if (Date.now() - lastScan >= CFG.scanMin * 60e3) {
       lastScan = Date.now();
       if (CFG.autopilot) await autopilotScan();
