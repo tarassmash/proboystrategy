@@ -30,7 +30,7 @@ const DEFAULTS = {
 function create({ ev, log, engineLog, lsGet, lsSet, env, testWs }) {
   const P = Object.assign({}, DEFAULTS, lsGet("ss", {}));
   if (!P.v) { if (P.scoreIn === 0.6 || P.scoreIn === 0.62) P.scoreIn = DEFAULTS.scoreIn; P.v = 2; }   // the first threshold was too strict for the live market
-  const ST = { trades: lsGet("ssTrades", []), dayStart: 0, dayPnl: 0, stoppedForDay: false, wsUp: false, lastMsg: 0, err: "" };
+  const ST = { hedge: !!lsGet("ssHedge", false), trades: lsGet("ssTrades", []), dayStart: 0, dayPnl: 0, stoppedForDay: false, wsUp: false, lastMsg: 0, err: "" };
   const M = {};           // per symbol market state
   const POSN = {};        // our live entries/positions per symbol
   const COOL = {};
@@ -154,12 +154,27 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs }) {
   const specOf = (sym) => ev(`spec(${JSON.stringify(sym)})`);
   const alignP = (v, step, up) => ev(`align(${v}, ${JSON.stringify(String(step))}, ${up})`);
   const lid = (sym, tag) => ("ss" + tag + sym.slice(0, 10) + Date.now().toString(36) + Math.floor(Math.random() * 99)).slice(0, 36);
+  // position mode of the account: one-way (positionIdx 0) or hedge (1 = long side, 2 = short side); found out on the first order
+  const idxFor = (posSide) => ST.hedge ? (posSide === "Buy" ? 1 : 2) : 0;
+  const idxErr = (e) => /position idx|position mode/i.test(String(e && e.message || e));
+  async function withIdx(fn) {
+    try { return await fn(); }
+    catch (e) {
+      if (!idxErr(e)) throw e;
+      ST.hedge = !ST.hedge; lsSet("ssHedge", ST.hedge);
+      log(`superscalp: position mode → ${ST.hedge ? "hedge" : "one-way"}`);
+      return fn();
+    }
+  }
   async function limit(sym, side, price, qty, reduce, tag, postOnly = true) {
     const id = lid(sym, tag);
-    await bx("/v5/order/create", { method: "POST", auth: true, body: { category: "linear", symbol: sym, side, orderType: "Limit", qty: String(qty), price: String(price),
-      timeInForce: postOnly ? "PostOnly" : "GTC", reduceOnly: !!reduce, orderLinkId: id, positionIdx: 0 } });
+    const posSide = reduce ? (side === "Buy" ? "Sell" : "Buy") : side;   // a reduce order closes the opposite side
+    await withIdx(() => bx("/v5/order/create", { method: "POST", auth: true, body: { category: "linear", symbol: sym, side, orderType: "Limit", qty: String(qty), price: String(price),
+      timeInForce: postOnly ? "PostOnly" : "GTC", reduceOnly: !!reduce, orderLinkId: id, positionIdx: idxFor(posSide) } }));
     return id;
   }
+  const setStop = (p, price) => withIdx(() => bx("/v5/position/trading-stop", { method: "POST", auth: true,
+    body: { category: "linear", symbol: p.sym, stopLoss: String(price), slTriggerBy: "MarkPrice", tpslMode: "Full", positionIdx: idxFor(p.side) } }));
   const cancel = (sym, id) => bx("/v5/order/cancel", { method: "POST", auth: true, body: { category: "linear", symbol: sym, orderLinkId: id } }).catch(() => {});
   const amend = (sym, id, price) => bx("/v5/order/amend", { method: "POST", auth: true, body: { category: "linear", symbol: sym, orderLinkId: id, price: String(price) } });
 
@@ -182,7 +197,7 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs }) {
     const tp = await alignP(entryPx * (1 + (long ? 1 : -1) * P.tpPct / 100), p.tick, long);
     const sl = await alignP(entryPx * (1 - (long ? 1 : -1) * P.slPct / 100), p.tick, !long);
     p.tp = Number(tp); p.sl = Number(sl);
-    try { await bx("/v5/position/trading-stop", { method: "POST", auth: true, body: { category: "linear", symbol: p.sym, stopLoss: String(sl), slTriggerBy: "MarkPrice", tpslMode: "Full", positionIdx: 0 } }); }
+    try { await setStop(p, sl); }
     catch (e) { engineLog(`⚡⚡ ${p.sym}: стоп не поставився: ${e.message}`, "down"); }
     try { p.tpId = await limit(p.sym, long ? "Sell" : "Buy", tp, p.qty, true, "T"); }
     catch (e) { p.tpId = await limit(p.sym, long ? "Sell" : "Buy", tp, p.qty, true, "T", false).catch(() => null); }
@@ -243,7 +258,7 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs }) {
         const live = new Map((ordR.list || []).map(o => [o.orderLinkId, o]));
         const pos = (posR.list || []).filter(x => Number(x.size) > 0);
         for (const p of Object.values(POSN)) {
-          const ps = pos.find(x => x.symbol === p.sym);
+          const ps = pos.find(x => x.symbol === p.sym && x.side === p.side);   // in hedge mode both sides can exist
           const sig = signals(p.sym);
           if (p.state === "entry") {
             if (ps) { await onFilled(p, Number(ps.avgPrice)); continue; }
@@ -261,7 +276,7 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs }) {
             const be = await alignP(p.entry * (1 + (long ? 1 : -1) * 0.06 / 100), p.tick, long);
             try {
               await amend(p.sym, p.tpId, ntp); p.tp = Number(ntp); p.rides = (p.rides || 0) + 1;
-              if (!p.beDone) { await bx("/v5/position/trading-stop", { method: "POST", auth: true, body: { category: "linear", symbol: p.sym, stopLoss: String(be), slTriggerBy: "MarkPrice", tpslMode: "Full", positionIdx: 0 } }); p.beDone = true; p.sl = Number(be); }
+              if (!p.beDone) { await setStop(p, be); p.beDone = true; p.sl = Number(be); }
               engineLog(`⚡⚡ ${p.sym}: імпульс триває — тейк → ${ntp}` + (p.beDone ? ", стоп у плюс" : ""), "up");
             } catch (e) { /* the take may have just filled */ }
           }
