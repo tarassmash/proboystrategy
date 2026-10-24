@@ -73,6 +73,7 @@ details summary { cursor: pointer; color: var(--mute); font-size: 12px; }
     <div class="row">
       <span class="pill" id="run-pill"><span class="dot"></span><span id="run-text">Зупинено</span></span>
       <button id="btn-mode" title="Перемкнути режим: пробій діапазону ↔ ракети">🚀 Режим ракет: вимк</button>
+      <button id="btn-auto" title="Повний автопілот: пробої + ракети, нові заявки кожен скан, сам послаблює фільтри, якщо довго нічого немає">🤖 Автопілот: вимк</button>
       <button class="gold" id="btn-start">Запустити бота</button>
       <button class="red" id="btn-stop">Зупинити і зняти стопи</button>
     </div>
@@ -143,6 +144,7 @@ details summary { cursor: pointer; color: var(--mute); font-size: 12px; }
 
   <section class="card">
     <div class="bar"><h2>Сетапи на біржі</h2><span class="sub" id="scan-info">—</span></div>
+    <div class="sub" id="auto-info" style="color:var(--up)"></div>
     <div class="row" style="margin:6px 0 10px">
       <input id="now-sym" placeholder="Монета, напр. SOLUSDT" style="max-width:200px" autocomplete="off" spellcheck="false">
       <button class="green" id="now-long">⚡ Лонг зараз</button>
@@ -1263,6 +1265,61 @@ async function manage() {
 }
 
 // ------------------------------------------------------------------ loop
+// ------------------------------------------------------------------ autopilot
+// Both strategies every scan; if several scans in a row find nothing while there are free slots,
+// the filters are relaxed step by step (max 3 steps) so new orders keep appearing; reset after a hit.
+let AP = Object.assign({ dry: 0, relax: 0, last: 0, added: 0 }, LS.get("ap", {}));
+const RELAX_KEYS = ["squeeze", "maxEr", "maxWidth", "rocketScore"];
+async function autopilotScan() {
+  const base = Object.fromEntries(RELAX_KEYS.map(k => [k, CFG[k]]));
+  const r = AP.relax || 0;
+  if (r) {
+    CFG.squeeze = Math.min(100, base.squeeze + 10 * r);
+    CFG.maxEr = Math.min(1, +(base.maxEr + 0.08 * r).toFixed(2));
+    CFG.maxWidth = +(base.maxWidth * (1 + 0.25 * r)).toFixed(2);
+    CFG.rocketScore = Math.max(10, base.rocketScore - 5 * r);
+  }
+  const before = SETUPS.length;
+  try {
+    await scan();
+    if (RUN && CFG.maxSetups - SETUPS.length > 0) await scanRocket(true);
+  } finally { Object.assign(CFG, base); }
+  const added = SETUPS.length - before, free = CFG.maxSetups - SETUPS.length;
+  AP.last = Date.now(); AP.added += Math.max(0, added);
+  if (added > 0) { AP.dry = 0; if (AP.relax) { log(`Автопілот: знайдено ${added}, фільтри повернуто до звичайних`, "mute"); AP.relax = 0; } }
+  else if (free > 0) {
+    AP.dry++;
+    if (AP.dry >= 3 && AP.relax < 3) { AP.relax++; AP.dry = 0; log(`Автопілот: 3 скани без нових сетапів — послаблюю фільтри (крок ${AP.relax}/3)`, "gold-t"); }
+  }
+  LS.set("ap", AP);
+}
+function paintAuto() {
+  const b = $("btn-auto");
+  b.textContent = CFG.autopilot ? "🤖 Автопілот: увімк" : "🤖 Автопілот: вимк";
+  b.className = CFG.autopilot ? "green" : "";
+}
+async function startRun() {
+  saveKeys();
+  try { await syncTime(); await bx("/v5/account/wallet-balance", { query: { accountType: "UNIFIED" }, auth: true }); }
+  catch (e) { showErr(e.message); log("Не запущено: " + e.message, "down"); return false; }
+  setRun(true); lastScan = 0; log("Бот запущено", "up"); loop();
+  return true;
+}
+$("btn-auto").onclick = async () => {
+  CFG.autopilot = !CFG.autopilot; LS.set("settings", CFG); paintAuto();
+  if (CFG.autopilot) {
+    log("🤖 Автопілот увімкнено: пробої + ракети кожні " + CFG.scanMin + " хв, нові заявки без вашої участі, доки не вимкнете", "up");
+    if (!RUN) { if (!(await startRun())) { CFG.autopilot = false; LS.set("settings", CFG); paintAuto(); } }
+    else { lastScan = 0; loop(); }
+  } else log("Автопілот вимкнено: бот працює в звичайному режимі (кнопка «Зупинити» — повна зупинка)", "mute");
+};
+function autoInfo() {
+  if (!CFG.autopilot || !RUN) return "";
+  const next = Math.max(0, Math.round((lastScan + CFG.scanMin * 60e3 - Date.now()) / 1000));
+  return `🤖 автопілот · наступний скан через ${next} с · нових сетапів ${AP.added}` + (AP.relax ? ` · фільтри послаблено ${AP.relax}/3` : "");
+}
+setInterval(() => { const t = autoInfo(); if ($("auto-info")) $("auto-info").textContent = t; }, 1000);
+
 async function loop() {
   if (!RUN || busy) return;
   busy = true;
@@ -1270,7 +1327,8 @@ async function loop() {
     await manage();
     if (Date.now() - lastScan >= CFG.scanMin * 60e3) {
       lastScan = Date.now();
-      if (CFG.mode === "rocket") await scanRocket(true); else await scan();
+      if (CFG.autopilot) await autopilotScan();
+      else if (CFG.mode === "rocket") await scanRocket(true); else await scan();
     }
     showErr("");
   } catch (e) { showErr(e.message); log(e.message, "down"); }
@@ -1282,15 +1340,11 @@ function setRun(on) {
   $("run-text").textContent = on ? "Працює" : "Зупинено";
   $("btn-start").disabled = on;
 }
-$("btn-start").onclick = async () => {
-  saveKeys();
-  try { await syncTime(); await bx("/v5/account/wallet-balance", { query: { accountType: "UNIFIED" }, auth: true }); }
-  catch (e) { showErr(e.message); log("Не запущено: " + e.message, "down"); return; }
-  setRun(true); lastScan = 0; log("Бот запущено", "up"); loop();
-};
+$("btn-start").onclick = () => startRun();
 $("btn-stop").onclick = async () => {
   if (!confirm("Зупинити бота і зняти всі його Buy/Sell Stop ордери?\nСітки на відкат теж буде знято. Відкриті позиції лишаться зі своїми стоп-лосом і тейк-профітом.")) return;
   setRun(false);
+  if (CFG.autopilot) { CFG.autopilot = false; LS.set("settings", CFG); paintAuto(); }
   for (const s of [...SETUPS]) {
     if (s.state !== "armed") { try { await cancelDip(s); if (s.dip) s.dip.levels = []; } catch (e) { log(`${s.symbol}: ${e.message}`, "down"); } continue; }
     try { await cancelAll(s); SETUPS = SETUPS.filter(x => x !== s); }
@@ -1474,6 +1528,7 @@ renderRadarLog();
 if (LS.get("tab", "bot") === "radar") document.querySelector('.tabs [data-tab="radar"]').click();
 setTimeout(checkRadarLog, 2000);
 paintMode();
+paintAuto();
 loadKeys();
 render();
 setRun(RUN);

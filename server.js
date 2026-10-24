@@ -28,6 +28,17 @@ if (process.env.BYBIT_API_KEY && process.env.BYBIT_API_SECRET) {
   saved["bx.env"] = JSON.stringify(env);
 }
 
+// AUTOPILOT=1: on a fresh server (nothing saved yet, e.g. no volume) start the bot in autopilot by itself.
+// After that the saved state wins: if you stop the bot on the page, it stays stopped after restarts.
+if ((process.env.AUTOPILOT || "").trim() === "1" && saved["bx.running"] === undefined && process.env.BYBIT_API_KEY) {
+  saved["bx.running"] = "true";
+  let st = {};
+  try { st = JSON.parse(saved["bx.settings"] || "{}"); } catch {}
+  st.autopilot = true;
+  saved["bx.settings"] = JSON.stringify(st);
+  console.log("AUTOPILOT=1: first start, bot starts in autopilot");
+}
+
 let dom;
 // activity of the bot itself: when it last talked to Bybit (works with no browser open)
 const ACT = { last: 0, count: 0, started: Date.now() };
