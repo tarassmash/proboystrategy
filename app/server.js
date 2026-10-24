@@ -294,6 +294,8 @@ It enters with LIMIT orders at the best price and takes a short LIMIT take; the 
    needAgree,cancelOnFade,flipExit,timeStopSec,adaptive,autoPrune,autoCoins,coinCount,minTurnoverM,pickEveryMin,invert ("off"|"on"|"auto"),invertMin}}
 "learn" (k-nearest-neighbour filter that skips setups whose most similar past trades lost) and "optExits" (take/stop re-tuned on
 recorded price paths, see "optimizer": current vs best avg % per trade, win rate, profit factor) work by themselves; keep them on.
+"style": "flow" (book + tape + icebergs/absorption/spoof) or "pressure" (book pressure only: heavier side for the last 2 s + longer
+best-price queue, tiny limit takes ~0.08%, exit as soon as the pressure goes away; high win rate, small wins).
 "invert": the mirror mode trades the opposite side with take and stop swapped; "auto" switches when the current mode loses
 over invertMin trades and pauses if both lose. Use "byMode" to compare normal vs inverted results.
 With autoCoins the bot itself re-picks the most volatile liquid coins ("volatilityTop": rng1h = range of the last hour, %); send "symbols" only to override.
@@ -351,7 +353,7 @@ Available actions (use only what the owner asked for):
  "bot": "start" | "stop"                    (autopilot of the breakout bot; stop also cancels its waiting orders)
  "scalp": true | false                      (scalping preset of the breakout bot)
  "ai": true | false                         (AI autopilot on/off)
- "superscalp": {"on":true|false, "symbols":[...], "params":{tpPct,slPct,scoreIn,maxPositions,margin,leverage,autoCoins,coinCount,minTurnoverM,invert,learn,optExits,dailyLossPct,...}}
+ "superscalp": {"on":true|false, "symbols":[...], "params":{style:"flow"|"pressure",tpPct,slPct,scoreIn,maxPositions,margin,leverage,autoCoins,coinCount,minTurnoverM,invert,learn,optExits,dailyLossPct,...}}
  "settings": {breakout bot settings: margin, leverage, maxSetups, maxMode, tpPct, slPct, tpR, chase, chaseAt, chaseGap, chaseStep, scanMin, refreshMin, tf, squeeze, maxEr, ...}
  "limits": {"maxLeverage": n, "maxMargin": n}   (caps the AI autopilot may not exceed - only when the owner explicitly asks)
  "optimize": "breakout" | "superscalp" | "both"
@@ -587,6 +589,12 @@ async function act(what) {
       saveAI();
     }
     return "OK";
+  } else if (what === "press") {
+    if (!HAS_KEYS) return "Немає ключів Bybit";
+    if (SS.params.style === "pressure" && SS.params.on) { SS.setStyle("flow"); return "OK"; }
+    SS.setStyle("pressure");
+    if (!SS.params.on) SS.setOn(true);
+    return "OK";
   } else if (what === "ss") {
     if (!HAS_KEYS) return "Немає ключів Bybit";
     SS.setOn(!SS.params.on);
@@ -626,6 +634,7 @@ const PAGE = `<!doctype html><html lang="uk"><head><meta charset="utf-8"><meta n
 @keyframes pulse{50%{opacity:.6}}
 .mini{min-height:36px;border-radius:10px;border:1px solid var(--line);background:var(--bg);color:var(--ink);padding:0 10px;font-size:12px;cursor:pointer}.mini.on{border-color:var(--up);color:var(--up)}
 .chip{display:inline-block;border:1px solid var(--line);border-radius:6px;padding:1px 6px;margin:2px;font:11px ui-monospace,monospace}
+.pr{background:transparent;border:2px solid #34d399;color:#6ee7b7;min-height:60px;font-size:18px}.pr.on{background:#059669;border-color:#059669;color:#fff}
 .ss{background:transparent;border:2px solid #22d3ee;color:#67e8f9;min-height:60px;font-size:18px}.ss.on{background:#0891b2;border-color:#0891b2;color:#fff}
 .big:disabled{opacity:.5;cursor:default}.row{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px}
 .k b{display:block;font:600 18px ui-monospace,monospace}.k span{font-size:12px;color:var(--mute)}
@@ -647,6 +656,7 @@ table{width:100%;border-collapse:collapse;font-size:13px}td,th{padding:6px 4px;b
 <div id="aiLine" style="font-size:13px;margin-top:6px"></div>
 <div style="margin-top:10px"><button class="big sc" id="scalp">⚡ Скальпінг</button></div>
 <div style="margin-top:10px"><button class="big ss" id="ss">⚡⚡ Суперскальпінг (стакан)</button></div>
+<div style="margin-top:10px"><button class="big pr" id="press">📊 Скальпінг тиском стакану</button></div>
 <div id="ssLine" style="font-size:13px;margin-top:6px"></div>
 <div id="chaseLine" style="font-size:13px;margin-top:10px"></div>
 <div class="mute" id="scalpHint" style="font-size:12px;margin-top:6px">Скальпінг: короткі угоди, тейк +0.5%, стоп −1% від входу, скан щохвилини.</div>
@@ -695,7 +705,8 @@ drawProgress(S.progress||{});
 $("notes").innerHTML=(S.notes||[]).length?"Постійні вказівки AI: "+S.notes.map((n,i)=>"«"+esc(n.text)+'» <a href="#" data-del="'+i+'" style="color:var(--down)">✕</a>').join(" · "):"";
 document.querySelectorAll("[data-del]").forEach(a=>a.onclick=async(e)=>{e.preventDefault();await fetch("/api/notes/del",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({i:Number(a.dataset.del)})});load()});
 const X=S.ss||{},XP=X.params||{},XS=X.stats||{};const sb=$("ss");sb.className="big ss"+(XP.on?" on":"");sb.disabled=busy;
-sb.textContent=XP.on?"⚡⚡ Суперскальпінг увімкнено":"⚡⚡ Суперскальпінг (стакан)";
+sb.textContent=XP.on?(XP.style==="pressure"?"⚡⚡ Суперскальпінг увімкнено (стиль: тиск)":"⚡⚡ Суперскальпінг увімкнено"):"⚡⚡ Суперскальпінг (стакан)";
+const pb=$("press"),pOn=XP.on&&XP.style==="pressure";pb.className="big pr"+(pOn?" on":"");pb.disabled=busy;pb.textContent=pOn?"📊 Тиск стакану: увімкнено · тейк +"+XP.tpPct+"%":"📊 Скальпінг тиском стакану";
 $("ssLine").innerHTML=(XP.on?'<span style="color:#67e8f9">':'<span class="mute">')+"Стакан, стрічка, айсберги, поглинання, спуфінг · вхід і тейк лімітками · тейк "+XP.tpPct+"% · стоп "+XP.slPct+"% · до "+XP.maxPositions+" угод · "+(X.ws?"дані наживо ✓":"підключаюсь до біржі…")+(X.stoppedForDay?' · <b class="down">денний ліміт збитку — пауза до завтра</b>':"")+(X.noMoney?'<br><b class="down">⏸ '+esc(X.noMoney)+"</b> — звільніть кошти (менше заявок основного бота або менша маржа), бот спробує знову через хвилину":"")+"</span>"+(X.err?'<br><span class="down">'+esc(X.err)+"</span>":"");
 const MD=X.mode||{};
 $("ssSum").innerHTML='<b>Режим: '+(MD.inverted?'<span style="color:#f59e0b">ІНВЕРСІЯ (торгую навпаки)</span>':"звичайний")+"</b> · налаштування "+esc(MD.setting||"")+(MD.normal?" · звичайний: "+MD.normal.n+" уг. "+f(MD.normal.pnl,3)+(MD.normal.win!=null?" ("+MD.normal.win+"%)":"")+" · інверсія: "+MD.inv.n+" уг. "+f(MD.inv.pnl,3)+(MD.inv.win!=null?" ("+MD.inv.win+"%)":""):"")+(MD.pausedUntil>Date.now()?'<br><b class="down">Пауза до '+new Date(MD.pausedUntil).toLocaleTimeString()+": обидва режими в мінусі</b>":"")+"<br>"+(XP.autoCoins?'<span style="color:#67e8f9">Монети: топ волатильності (оновлення кожні '+XP.pickEveryMin+" хв)"+((X.vol||[]).length?" — "+X.vol.slice(0,XP.coinCount).map(v=>esc(v.sym)+" "+v.rng1h+"%/год").join(", "):"")+"</span><br>":"")+"Угод "+(XS.n||0)+(XS.win!=null?" · win "+XS.win+"%":"")+" · PnL "+f(XS.pnl,4)+" · за добу "+(XS.day||0)+" угод "+f(XS.dayPnl,4)+(XS.avgHold!=null?" · середня угода "+XS.avgHold+" с":"")+" · монети: "+esc((XP.symbols||[]).join(", "));
@@ -705,7 +716,7 @@ $("ssLearn").innerHTML='<b>🎯 Навчання на своїх угодах</b
 +" · траєкторій для оптимізатора: "+(LN.paths||0)
 +(OP&&OP.best?'<br>Оптимізатор ('+new Date(OP.at).toLocaleTimeString()+", "+OP.n+" угод): зараз тейк "+OP.cur.tp+"% / стоп "+OP.cur.sl+"% → на угоду "+OP.cur.avg+"%, win "+OP.cur.win+"%, PF "+OP.cur.pf+' · найкраще <b class="up">тейк '+OP.best.tp+"% / стоп "+OP.best.sl+"%"+(OP.best.adaptive?" (адаптивно)":"")+"</b> → "+OP.best.avg+"%, win "+OP.best.win+"%, PF "+OP.best.pf+(OP.applied?' · <span class="up">застосовано</span>':""):(OP?"<br>Оптимізатор: з "+OP.n+" угод прибуткової пари тейк/стоп ще не знайдено":"<br>Оптимізатор запуститься після 30 угод з траєкторіями (далі кожні 15 угод)"));
 $("ssLive").innerHTML=(X.live||[]).map(l=>{const sg=[l.iceBid?"айсберг↑":"",l.iceAsk?"айсберг↓":"",l.absBull?"поглин.↑":"",l.absBear?"поглин.↓":"",l.spoofBid?"спуф bid":"",l.spoofAsk?"спуф ask":""].filter(Boolean).join(" ");
-return "<tr><td><b>"+esc(l.sym)+'</b></td><td class="'+(l.imb>=0.5?"up":"down")+'">'+(l.imb??"—")+'</td><td class="'+(l.delta>=0?"up":"down")+'">'+(l.delta??"—")+"</td><td>"+(l.burst!=null?"×"+l.burst:"—")+"</td><td>"+(sg||'<span class="mute">—</span>')+'</td><td class="'+(l.long>=XP.scoreIn?"up":"")+'">'+(l.long??"—")+'</td><td class="'+(l.short>=XP.scoreIn?"down":"")+'">'+(l.short??"—")+"</td><td>"+(l.peak10!=null?l.peak10:"—")+'</td><td class="mute">'+esc(l.why||"")+"</td></tr>"}).join("")||'<tr><td colspan="9" class="mute">Чекаю дані стакану…</td></tr>';
+return "<tr><td><b>"+esc(l.sym)+'</b></td><td class="'+(l.imb>=0.5?"up":"down")+'">'+(l.press?(l.press.lvl+" · черга "+l.press.que):(l.imb??"—"))+'</td><td class="'+(l.delta>=0?"up":"down")+'">'+(l.delta??"—")+"</td><td>"+(l.burst!=null?"×"+l.burst:"—")+"</td><td>"+(sg||'<span class="mute">—</span>')+'</td><td class="'+(l.long>=XP.scoreIn?"up":"")+'">'+(l.long??"—")+'</td><td class="'+(l.short>=XP.scoreIn?"down":"")+'">'+(l.short??"—")+"</td><td>"+(l.peak10!=null?l.peak10:"—")+'</td><td class="mute">'+esc(l.why||"")+"</td></tr>"}).join("")||'<tr><td colspan="9" class="mute">Чекаю дані стакану…</td></tr>';
 $("ssOpen").innerHTML=(X.open||[]).map(o=>"<tr><td><b>"+esc(o.sym)+'</b> <span class="'+(o.side==="Buy"?"up":"down")+'">'+(o.side==="Buy"?"лонг":"шорт")+"</span></td><td>"+(o.state==="entry"?"чекає виконання ліміту":"в угоді"+(o.rides?" · імпульс ×"+o.rides:""))+"</td><td>"+esc(o.entry)+"</td><td>"+esc(o.tp||"—")+"</td><td>"+esc(o.sl||"—")+"</td><td>"+o.sec+"</td></tr>").join("")||'<tr><td colspan="6" class="mute">Відкритих угод суперскальпінгу немає</td></tr>';
 $("ssTrades").innerHTML=(X.trades||[]).map(t=>"<div>"+new Date(t.closedAt).toLocaleTimeString()+" · "+esc(t.sym)+" "+(t.side==="Buy"?"лонг":"шорт")+" · "+esc(t.how)+' · <span class="'+(t.pnl>=0?"up":"down")+'">'+(t.pnl>=0?"+":"")+t.pnl+"</span> · "+t.holdSec+" с</div>").join("");
 $("chaseLine").innerHTML=S.chase?'<span class="up">🚀 Трейлінг стопа і тейку увімкнено</span> <span class="mute">— після '+Math.round(S.chaseAt*100)+"% шляху до тейку стоп іде за ціною, а тейк відсувається далі в бік руху, щоб забрати весь імпульс</span>":'<span class="mute">Трейлінг стопа і тейку вимкнено</span>';
@@ -739,6 +750,7 @@ s2+='<polyline fill="none" stroke="#c4b5fd" stroke-width="2" points="'+cums.map(
 else s2='<text x="12" y="75" fill="#848e9c" font-size="13">Перший результат з&#39;явиться після другого рішення AI</text>';
 $("decChart").innerHTML=s2;}
 $("ssOpt").onclick=()=>act("ssopt","");
+$("press").onclick=()=>act("press",S&&S.ss&&!(S.ss.params.on&&S.ss.params.style==="pressure")?"Увімкнути скальпінг тиском стакану? Бот іде за боком, де стакан важчий, тейк +0.08% лімітом (трохи більше за комісії), стоп −0.25%, вихід одразу, коли тиск зник. Часті маленькі плюси.":"");
 $("ss").onclick=()=>act("ss",S&&S.ss&&!S.ss.params.on?"Увімкнути суперскальпінг за стаканом? Вхід і тейк лімітками, стоп на біржі, до "+S.ss.params.maxPositions+" угод одночасно"+(S.ss.params.dailyLossPct>0?", денний ліміт збитку "+S.ss.params.dailyLossPct+"%":", без денного ліміту")+".":"");
 // ---- voice / text commands ----
 let PLAN=null;
@@ -790,7 +802,7 @@ http.createServer(async (req, res) => {
         return json(200, { text: await applyCommand(b.id) });
       } catch (e) { return json(200, { error: String(e && e.message || e) }); }
     }
-    if (req.method === "POST" && /^\/api\/(start|stop|scalp|ai|optimize|autoopt|ss|ssopt)$/.test(url.pathname)) {
+    if (req.method === "POST" && /^\/api\/(start|stop|scalp|ai|optimize|autoopt|ss|ssopt|press)$/.test(url.pathname)) {
       if (!PASSWORD) return json(200, { text: "Задайте UI_PASSWORD у Railway → Variables, щоб керувати ботом" });
       return json(200, { text: await act(url.pathname.split("/").pop()) });
     }
