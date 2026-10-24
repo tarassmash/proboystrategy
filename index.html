@@ -499,8 +499,18 @@ function bracket(a, sp, side, tpR = CFG.tpR) {
   const risk = Math.abs(trig - sl);
   // fixed % take (scalping) or a multiple of the risk
   const tp = CFG.tpPct > 0 ? (long ? trig * (1 + CFG.tpPct / 100) : trig * (1 - CFG.tpPct / 100)) : (long ? trig + tpR * risk : trig - tpR * risk);
+  const dir = long ? 1 : 2;                                       // upper trigger fires on a rise, lower on a fall
+  if (CFG.inverse) {
+    // everything the other way round: at the same trigger the opposite side, take and stop swap distances (the mirror trade)
+    const T = Math.abs(tp - trig), S = Math.abs(trig - sl), L = !long;
+    const tp2 = L ? trig + S : trig - S, sl2 = L ? trig - T : trig + T;
+    return {
+      side: L ? "Buy" : "Sell", dir, inv: true, trigger: align(trig, sp.tick, long), limit: align(L ? trig * (1 + slip) : trig * (1 - slip), sp.tick, L),
+      sl: align(sl2, sp.tick, !L), tp: align(tp2, sp.tick, L), risk: T, riskPct: T / trig * 100,
+    };
+  }
   return {
-    side, trigger: align(trig, sp.tick, long), limit: align(long ? trig * (1 + slip) : trig * (1 - slip), sp.tick, long),
+    side, dir, trigger: align(trig, sp.tick, long), limit: align(long ? trig * (1 + slip) : trig * (1 - slip), sp.tick, long),
     sl: align(sl, sp.tick, !long), tp: align(tp, sp.tick, long), risk, riskPct: risk / trig * 100,
   };
 }
@@ -521,7 +531,7 @@ async function arm(a, opts = {}) {
     const id = linkId(a.symbol, l.side);
     const body = {
       category: "linear", symbol: a.symbol, side: l.side, orderType: CFG.orderType, qty,
-      triggerPrice: l.trigger, triggerDirection: l.side === "Buy" ? 1 : 2, triggerBy: CFG.triggerBy,
+      triggerPrice: l.trigger, triggerDirection: l.dir || (l.side === "Buy" ? 1 : 2), triggerBy: CFG.triggerBy,
       timeInForce: CFG.orderType === "Market" ? "IOC" : "GTC", orderLinkId: id, reduceOnly: false,
       stopLoss: l.sl, takeProfit: l.tp, tpslMode: "Full", slTriggerBy: "MarkPrice", tpTriggerBy: "LastPrice",
     };
@@ -533,7 +543,7 @@ async function arm(a, opts = {}) {
   SETUPS.push({
     symbol: a.symbol, state: "armed", createdAt: now, expiresAt: now + CFG.expiryH * 3600e3, qty, lev,
     hi: align(a.hi, sp.tick, true), lo: align(a.lo, sp.tick, false), mid: align(a.mid, sp.tick, false), width: a.width, squeeze: a.squeeze, er: a.er, atr: a.atr,
-    buy: placed.find(p => p.side === "Buy"), sell: placed.find(p => p.side === "Sell"),
+    buy: placed.find(p => p.side === "Buy"), sell: placed.find(p => p.side === "Sell"), sides, inv: !!CFG.inverse,
     kind: opts.kind || "breakout", score: a.score ?? null, reasons: a.reasons || [], cfg: cfgSnap(),
   });
   saveSetups();
@@ -1413,7 +1423,7 @@ async function refreshArmed() {
     SETUPS = SETUPS.filter(x => x !== s); saveSetups();
     if (bad) { dropped++; log(`${s.symbol}: діапазон став ${a.width.toFixed(2)}% — сетап знято, слот вільний`, "mute"); continue; }
     try {
-      const opts = s.kind === "rocket" ? { kind: "rocket", tpR: CFG.rocketTpR, sides: s.sell ? ["Buy", "Sell"] : ["Buy"] } : {};
+      const opts = s.kind === "rocket" ? { kind: "rocket", tpR: CFG.rocketTpR, sides: s.sides || (s.sell ? ["Buy", "Sell"] : ["Buy"]) } : {};
       if (s.score != null) { a.score = s.score; a.reasons = s.reasons; }
       const msg = await arm(a, opts);
       const n = SETUPS[SETUPS.length - 1];
