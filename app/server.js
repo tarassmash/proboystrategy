@@ -102,6 +102,7 @@ async function refreshAccount() {
     const r = await ev(`bx("/v5/account/wallet-balance", { query: { accountType: "UNIFIED" }, auth: true })`);
     const a = ((r && r.list) || [])[0] || {};
     Object.assign(ACC, { equity: Number(a.totalEquity || 0), available: Number(a.totalAvailableBalance || 0), error: "", at: Date.now() });
+    W.__eq = ACC.equity;
     // equity curve for the progress chart: one point every 10 minutes, ~3 weeks kept
     try {
       const eq = JSON.parse(W.localStorage.getItem("bx.eq") || "[]");
@@ -285,6 +286,12 @@ Extra actions you may use:
  "open":[{"symbol":"SOLUSDT","side":"Buy|Sell","why":"..."}]  (max 3, enters now with a limit order, stop and take are set automatically)
  "cancel":["SYMBOL"]  (remove waiting breakout orders)
  settings may also contain: maxSetups, maxMode ("balance"|"fixed"), rocketScore, rocketTpR, tf (1,3,5,15,30,60), lookback, coins, minTurnover, trailR, nowLadder, margin.
+Super scalping (order flow): "superscalp" shows its parameters, results by symbol/signal/take and live signals per coin
+(imb = book imbalance 0..1, delta = tape buy-sell share, burst = 5 s volume vs normal, iceberg, absorption, spoof, long/short scores).
+It enters with LIMIT orders at the best price and takes a short LIMIT take; the stop is on the exchange. You control it fully:
+ "superscalp":{"on":true|false,"symbols":["BTCUSDT",...up to 12 liquid coins],"params":{tpPct,slPct,scoreIn,bandPct,burstX,wallX,spoofSec,icebergX,
+   entryWaitSec,holdMaxSec,maxPositions,cooldownSec,dailyLossPct,margin,leverage,ride,useIceberg,useAbsorption,useSpoof}}
+Choose the most liquid, most active coins for it; tpPct must beat maker fees (0.04% round trip).
 Add "lesson": one sentence in Ukrainian about what you learned from your track record.
 `;
 const SYSTEM = SYSTEM_FULL + `You are the risk-aware autopilot of a Bybit USDT-perpetual breakout bot. Every few minutes you receive the market state,
@@ -367,6 +374,13 @@ async function applyDecision(d) {
       changes.push(`закрито ${p.symbol}`);
     } catch (e) { changes.push(`не закрив ${p.symbol}: ${e.message}`); }
   }
+  // super scalping: on/off, coins and every parameter (margin and leverage capped like everything else)
+  if (d.superscalp && typeof d.superscalp === "object") {
+    const ssc = SS.setParams(Object.assign({}, d.superscalp.params || {}, Array.isArray(d.superscalp.symbols) ? { symbols: d.superscalp.symbols } : {}),
+      { margin: AI.maxMargin || cur.margin, leverage: AI.maxLev || cur.leverage });
+    if (ssc.length) changes.push("суперскальпінг: " + ssc.join(", "));
+    if (typeof d.superscalp.on === "boolean" && d.superscalp.on !== SS.params.on) { SS.setOn(d.superscalp.on); changes.push(d.superscalp.on ? "суперскальпінг увімкнено" : "суперскальпінг вимкнено"); }
+  }
   // cancel waiting breakout orders the AI no longer wants
   for (const sym of (Array.isArray(d.cancel) ? d.cancel : []).slice(0, 30)) {
     const S = String(sym).toUpperCase();
@@ -412,6 +426,7 @@ async function aiTick(force) {
     const ctx = Object.assign({ time: new Date().toISOString() }, await marketContext(), botContext(), {
       performance: perf(),
       account: { equity: ACC.equity, available: ACC.available },
+      superscalp: SS.aiView(),
       yourTrackRecord: AI.history.slice(-12).map(h => ({ at: new Date(h.at).toISOString(), mode: h.mode, regime: h.regime, changes: h.changes, lesson: h.lesson || "",
         periodPnlUsdt: h.periodPnl ?? null, periodTrades: h.periodTrades ?? null, periodWins: h.periodWins ?? null, equityAtDecision: h.equity ?? null })),
     });
@@ -427,6 +442,9 @@ async function aiTick(force) {
   } finally { AI.busy = false; saveAI(); dumpStorage(); }
 }
 setInterval(() => aiTick(false), 30000);
+
+// ---------------- super scalping by order flow ----------------
+const SS = require("./superscalp").create({ ev, log, engineLog, lsGet, lsSet, env: ENV, testWs: (process.env.TEST_WS_URL || "").trim() });
 
 function state() {
   const s = JSON.parse(ev(`JSON.stringify({
@@ -447,7 +465,7 @@ function state() {
     ai: { on: AI.on, busy: AI.busy, key: !!FAL_KEY, model: FAL_MODEL, every: AI_EVERY, error: AI.error, maxLev: AI.maxLev,
       next: AI.on ? Math.max(0, Math.round((AI.last + AI_EVERY * 60000 - Date.now()) / 1000)) : null, history: AI.history.slice(-5).reverse() },
     aiPause: !!ev("CFG.aiPause"),
-    perf: perf(), autoOpt: AUTO_OPT(), progress: progress(),
+    perf: perf(), autoOpt: AUTO_OPT(), progress: progress(), ss: SS.view(),
     lastBybitSec: ACT.last ? Math.round((Date.now() - ACT.last) / 1000) : -1, upMin: Math.round((Date.now() - ACT.started) / 60000),
     stats: {
       all: tr.length, pnl: tr.reduce((a, t) => a + t.pnl, 0), win: tr.length ? Math.round(tr.filter(t => t.pnl > 0).length / tr.length * 100) : null,
@@ -463,6 +481,7 @@ async function act(what) {
     if (!ev("CFG.autopilot")) click("btn-auto"); else click("btn-start");
   } else if (what === "stop") {
     click("btn-stop");
+    if (SS.params.on) SS.setOn(false);
     if (AI.on) { AI.on = false; ev("CFG.aiPause = false"); saveAI(); }
   } else if (what === "ai") {
     if (!FAL_KEY) return "Додайте FAL_KEY (ключ fal.ai) у Railway → Variables, потім увімкніть AI";
@@ -481,6 +500,10 @@ async function act(what) {
       engineLog("🧠 AI-автопілот вимкнено: бот лишається на звичайному автопілоті", "mute");
       saveAI();
     }
+    return "OK";
+  } else if (what === "ss") {
+    if (!HAS_KEYS) return "Немає ключів Bybit";
+    SS.setOn(!SS.params.on);
     return "OK";
   } else if (what === "optimize") {
     return optimizeNow("кнопка");
@@ -509,6 +532,7 @@ const PAGE = `<!doctype html><html lang="uk"><head><meta charset="utf-8"><meta n
 .ai{background:transparent;border:2px solid #a78bfa;color:#c4b5fd;min-height:60px;font-size:18px}.ai.on{background:#7c3aed;border-color:#7c3aed;color:#fff}
 .mini{min-height:36px;border-radius:10px;border:1px solid var(--line);background:var(--bg);color:var(--ink);padding:0 10px;font-size:12px;cursor:pointer}.mini.on{border-color:var(--up);color:var(--up)}
 .chip{display:inline-block;border:1px solid var(--line);border-radius:6px;padding:1px 6px;margin:2px;font:11px ui-monospace,monospace}
+.ss{background:transparent;border:2px solid #22d3ee;color:#67e8f9;min-height:60px;font-size:18px}.ss.on{background:#0891b2;border-color:#0891b2;color:#fff}
 .big:disabled{opacity:.5;cursor:default}.row{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px}
 .k b{display:block;font:600 18px ui-monospace,monospace}.k span{font-size:12px;color:var(--mute)}
 .dot{display:inline-block;width:10px;height:10px;border-radius:50%;background:var(--mute);margin-right:6px}.dot.on{background:var(--up);box-shadow:0 0 10px var(--up)}
@@ -523,6 +547,8 @@ table{width:100%;border-collapse:collapse;font-size:13px}td,th{padding:6px 4px;b
 <div style="margin-top:10px"><button class="big ai" id="ai">🧠 AI-автопілот</button></div>
 <div id="aiLine" style="font-size:13px;margin-top:6px"></div>
 <div style="margin-top:10px"><button class="big sc" id="scalp">⚡ Скальпінг</button></div>
+<div style="margin-top:10px"><button class="big ss" id="ss">⚡⚡ Суперскальпінг (стакан)</button></div>
+<div id="ssLine" style="font-size:13px;margin-top:6px"></div>
 <div id="chaseLine" style="font-size:13px;margin-top:10px"></div>
 <div class="mute" id="scalpHint" style="font-size:12px;margin-top:6px">Скальпінг: короткі угоди, тейк +0.5%, стоп −1% від входу, скан щохвилини.</div>
 <div id="warn"></div></div>
@@ -534,6 +560,10 @@ table{width:100%;border-collapse:collapse;font-size:13px}td,th{padding:6px 4px;b
 <div class="card"><div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap"><b>📈 Що приносить прибуток</b>
 <span><button class="mini" id="opt">Застосувати найприбутковіші</button> <button class="mini" id="autoopt">Авто раз на добу</button></span></div>
 <div class="mute" id="perfSum" style="font-size:13px;margin-top:6px"></div><div id="perfRows" style="margin-top:6px"></div></div>
+<div class="card" id="ssCard"><b>⚡⚡ Суперскальпінг: стакан і стрічка наживо</b><div class="mute" id="ssSum" style="font-size:13px;margin-top:4px"></div>
+<div class="scroll"><table><thead><tr><th>Монета</th><th>Стакан</th><th>Дельта</th><th>Сплеск</th><th>Сигнали</th><th>Лонг</th><th>Шорт</th></tr></thead><tbody id="ssLive"></tbody></table></div>
+<div class="scroll" style="margin-top:8px"><table><thead><tr><th>Угода</th><th>Стан</th><th>Вхід</th><th>Тейк</th><th>Стоп</th><th>с</th></tr></thead><tbody id="ssOpen"></tbody></table></div>
+<div class="log" id="ssTrades" style="margin-top:6px"></div></div>
 <div class="card"><b>🧠 Прогрес AI</b><div class="mute" id="progSum" style="font-size:13px;margin-top:4px"></div>
 <div style="font-size:12px;margin-top:8px" class="mute">Капітал, USDT · фіолетові лінії — рішення AI</div><svg id="eqChart" viewBox="0 0 600 180" style="width:100%;height:180px;display:block"></svg>
 <div style="font-size:12px;margin-top:8px" class="mute">Результат кожного періоду після рішення AI (USDT) · лінія — накопичено</div><svg id="decChart" viewBox="0 0 600 150" style="width:100%;height:150px;display:block"></svg></div>
@@ -561,6 +591,14 @@ $("perfSum").innerHTML=P.total?("Угод "+P.total+" · win "+P.win+"% · PnL "
 $("perfRows").innerHTML=(P.params||[]).filter(p=>p.rows.length).map(p=>'<div style="margin-top:6px;font-size:13px"><b>'+esc(p.name)+"</b>"+(p.best?' · <span class="up">найкраще '+esc(p.best.value)+"</span>":"")+"<br>"+p.rows.map(r=>'<span class="chip '+(r.avgRoi>=0?"up":"down")+'">'+esc(r.value)+": "+(r.avgRoi>=0?"+":"")+r.avgRoi+"% · "+r.n+" уг. · "+r.win+"%</span>").join("")+"</div>").join("")+((P.byExit||[]).length?'<div style="margin-top:6px;font-size:13px"><b>Чим закрились</b><br>'+P.byExit.map(r=>'<span class="chip '+(r.pnl>=0?"up":"down")+'">'+esc(r.value)+": "+r.n+" · "+(r.pnl>=0?"+":"")+r.pnl+"</span>").join("")+"</div>":"")+((P.byHour||[]).length?'<div style="margin-top:6px;font-size:13px"><b>Години</b><br>'+P.byHour.map(r=>'<span class="chip '+(r.pnl>=0?"up":"down")+'">'+esc(r.value)+": "+r.n+" · "+(r.pnl>=0?"+":"")+r.pnl+"</span>").join("")+"</div>":"");
 $("autoopt").className="mini"+(S.autoOpt?" on":"");$("autoopt").textContent=S.autoOpt?"Авто раз на добу: увімк":"Авто раз на добу";
 drawProgress(S.progress||{});
+const X=S.ss||{},XP=X.params||{},XS=X.stats||{};const sb=$("ss");sb.className="big ss"+(XP.on?" on":"");sb.disabled=busy;
+sb.textContent=XP.on?"⚡⚡ Суперскальпінг увімкнено":"⚡⚡ Суперскальпінг (стакан)";
+$("ssLine").innerHTML=(XP.on?'<span style="color:#67e8f9">':'<span class="mute">')+"Стакан, стрічка, айсберги, поглинання, спуфінг · вхід і тейк лімітками · тейк "+XP.tpPct+"% · стоп "+XP.slPct+"% · до "+XP.maxPositions+" угод · "+(X.ws?"дані наживо ✓":"підключаюсь до біржі…")+(X.stoppedForDay?' · <b class="down">денний ліміт збитку — пауза до завтра</b>':"")+"</span>"+(X.err?'<br><span class="down">'+esc(X.err)+"</span>":"");
+$("ssSum").innerHTML="Угод "+(XS.n||0)+(XS.win!=null?" · win "+XS.win+"%":"")+" · PnL "+f(XS.pnl,4)+" · за добу "+(XS.day||0)+" угод "+f(XS.dayPnl,4)+(XS.avgHold!=null?" · середня угода "+XS.avgHold+" с":"")+" · монети: "+esc((XP.symbols||[]).join(", "));
+$("ssLive").innerHTML=(X.live||[]).map(l=>{const sg=[l.iceBid?"айсберг↑":"",l.iceAsk?"айсберг↓":"",l.absBull?"поглин.↑":"",l.absBear?"поглин.↓":"",l.spoofBid?"спуф bid":"",l.spoofAsk?"спуф ask":""].filter(Boolean).join(" ");
+return "<tr><td><b>"+esc(l.sym)+'</b></td><td class="'+(l.imb>=0.5?"up":"down")+'">'+l.imb+'</td><td class="'+(l.delta>=0?"up":"down")+'">'+l.delta+"</td><td>×"+l.burst+"</td><td>"+(sg||'<span class="mute">—</span>')+'</td><td class="'+(l.long>=XP.scoreIn?"up":"")+'">'+l.long+'</td><td class="'+(l.short>=XP.scoreIn?"down":"")+'">'+l.short+"</td></tr>"}).join("")||'<tr><td colspan="7" class="mute">Чекаю дані стакану…</td></tr>';
+$("ssOpen").innerHTML=(X.open||[]).map(o=>"<tr><td><b>"+esc(o.sym)+'</b> <span class="'+(o.side==="Buy"?"up":"down")+'">'+(o.side==="Buy"?"лонг":"шорт")+"</span></td><td>"+(o.state==="entry"?"чекає виконання ліміту":"в угоді"+(o.rides?" · імпульс ×"+o.rides:""))+"</td><td>"+esc(o.entry)+"</td><td>"+esc(o.tp||"—")+"</td><td>"+esc(o.sl||"—")+"</td><td>"+o.sec+"</td></tr>").join("")||'<tr><td colspan="6" class="mute">Відкритих угод суперскальпінгу немає</td></tr>';
+$("ssTrades").innerHTML=(X.trades||[]).map(t=>"<div>"+new Date(t.closedAt).toLocaleTimeString()+" · "+esc(t.sym)+" "+(t.side==="Buy"?"лонг":"шорт")+" · "+esc(t.how)+' · <span class="'+(t.pnl>=0?"up":"down")+'">'+(t.pnl>=0?"+":"")+t.pnl+"</span> · "+t.holdSec+" с</div>").join("");
 $("chaseLine").innerHTML=S.chase?'<span class="up">🚀 Трейлінг стопа і тейку увімкнено</span> <span class="mute">— після '+Math.round(S.chaseAt*100)+"% шляху до тейку стоп іде за ціною, а тейк відсувається далі в бік руху, щоб забрати весь імпульс</span>":'<span class="mute">Трейлінг стопа і тейку вимкнено</span>';
 $("warn").innerHTML=w.map(x=>'<div class="note warn">'+esc(x)+"</div>").join("");
 $("eq").textContent=f(S.acc.equity);$("av").textContent=f(S.acc.available);
@@ -591,6 +629,7 @@ s2+='<line x1="10" x2="590" y1="'+mid+'" y2="'+mid+'" stroke="#2b3139"/>';
 s2+='<polyline fill="none" stroke="#c4b5fd" stroke-width="2" points="'+cums.map((c,i)=>(10+i*bw+bw/2).toFixed(1)+","+(mid-c/cm*65).toFixed(1)).join(" ")+'"/>'}
 else s2='<text x="12" y="75" fill="#848e9c" font-size="13">Перший результат з&#39;явиться після другого рішення AI</text>';
 $("decChart").innerHTML=s2;}
+$("ss").onclick=()=>act("ss",S&&S.ss&&!S.ss.params.on?"Увімкнути суперскальпінг за стаканом? Вхід і тейк лімітками, стоп на біржі, до "+S.ss.params.maxPositions+" угод одночасно, денний ліміт збитку "+S.ss.params.dailyLossPct+"%.":"");
 $("opt").onclick=()=>act("optimize","Застосувати найприбутковіші налаштування за статистикою угод?");
 $("autoopt").onclick=()=>act("autoopt","");
 $("scalp").onclick=()=>act("scalp",S&&!S.scalp?"Увімкнути скальпінг? Тейк +0.5%, стоп −1% від входу. Діє на нові заявки.":"");
@@ -612,7 +651,7 @@ http.createServer(async (req, res) => {
   if (!authorised(req)) { res.writeHead(401, { "WWW-Authenticate": 'Basic realm="Proboy Autopilot"' }); return res.end("Потрібен пароль (UI_PASSWORD)"); }
   try {
     if (url.pathname === "/api/state") return json(200, state());
-    if (req.method === "POST" && /^\/api\/(start|stop|scalp|ai|optimize|autoopt)$/.test(url.pathname)) {
+    if (req.method === "POST" && /^\/api\/(start|stop|scalp|ai|optimize|autoopt|ss)$/.test(url.pathname)) {
       if (!PASSWORD) return json(200, { text: "Задайте UI_PASSWORD у Railway → Variables, щоб керувати ботом" });
       return json(200, { text: await act(url.pathname.split("/").pop()) });
     }
