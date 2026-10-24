@@ -32,6 +32,11 @@ const DEFAULTS = {
   timeStopSec: 90,       // no progress in this time: leave near break-even (limit)
   adaptive: true,        // take/stop follow the last minute's range
   autoPrune: true,       // pause losing coins, switch off losing signal types
+  // coins: the most volatile liquid coins, re-picked every few minutes
+  autoCoins: true,
+  coinCount: 6,
+  minTurnoverM: 50,      // 24 h turnover, million $ (thin coins have wide spreads and fake moves)
+  pickEveryMin: 10,
 };
 
 function create({ ev, log, engineLog, lsGet, lsSet, env, testWs }) {
@@ -250,6 +255,46 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs }) {
     } catch (e) { /* next time */ }
   }
 
+  // ---------------- pick the most volatile coins ----------------
+  // volatility = range of the last hour on 5-minute candles; only coins with enough turnover and a tight spread
+  ST.vol = [];
+  async function pickCoins(force) {
+    if (!P.autoCoins || (!force && Date.now() - (ST.pickedAt || 0) < P.pickEveryMin * 60000)) return;
+    ST.pickedAt = Date.now();
+    try {
+      const all = ((await bx("/v5/market/tickers", { query: { category: "linear" } })).list || [])
+        .filter(t => /USDT$/.test(t.symbol) && Number(t.turnover24h) >= P.minTurnoverM * 1e6 && Number(t.lastPrice) > 0)
+        .map(t => { const last = Number(t.lastPrice), bid = Number(t.bid1Price) || last, ask = Number(t.ask1Price) || last;
+          return { sym: t.symbol, last, spreadPct: (ask - bid) / last * 100, range24: (Number(t.highPrice24h) - Number(t.lowPrice24h)) / last * 100, turnoverM: Math.round(Number(t.turnover24h) / 1e6) }; })
+        .filter(t => t.spreadPct <= 0.05)
+        .sort((a, b) => b.range24 - a.range24).slice(0, 30);   // the 30 most volatile today, then check the last hour
+      const rows = [];
+      for (const t of all) {
+        try {
+          const k = await bx("/v5/market/kline", { query: { category: "linear", symbol: t.sym, interval: "5", limit: "12" } });
+          const c = (k.list || []).map(r => ({ h: +r[2], l: +r[3], v: +r[6] || 0 }));
+          if (c.length < 6) continue;
+          const rng1h = (Math.max(...c.map(x => x.h)) - Math.min(...c.map(x => x.l))) / t.last * 100;
+          const avg5 = c.reduce((a, x) => a + (x.h - x.l) / t.last * 100, 0) / c.length;
+          rows.push(Object.assign(t, { rng1h: +rng1h.toFixed(2), avg5: +avg5.toFixed(3), score: +(rng1h * 0.6 + avg5 * 6 + t.range24 * 0.05).toFixed(2) }));
+        } catch (e) { /* skip */ }
+      }
+      rows.sort((a, b) => b.score - a.score);
+      ST.vol = rows.slice(0, 12);
+      const now = Date.now();
+      const keep = Object.keys(POSN);                                    // never drop a coin we are trading
+      const fresh = rows.filter(r => (COOL[r.sym] || 0) < now && !keep.includes(r.sym)).map(r => r.sym);
+      const list = [...new Set(keep.concat(fresh))].slice(0, Math.max(P.coinCount, keep.length));
+      if (list.length && list.join() !== P.symbols.join()) {
+        const before = P.symbols.slice();
+        P.symbols = list; save(); resubscribe();
+        engineLog(`⚡⚡ Топ волатильності: ${list.map(s => { const r = rows.find(x => x.sym === s); return r ? `${s} ${r.rng1h}%/год` : s; }).join(", ")}`
+          + (before.length ? ` (було ${before.join(", ")})` : ""), "gold-t");
+      }
+    } catch (e) { ST.err = "вибір монет: " + (e && e.message || e); log("pickCoins:", e && (e.stack || e.message || e)); }
+  }
+  setInterval(() => { if (P.on) pickCoins(false); }, 30000);
+
   // drop what loses: a coin with a losing recent run pauses for an hour; a signal type that keeps losing is switched off
   function prune(sym) {
     const last = ST.trades.filter(x => x.sym === sym).slice(-8);
@@ -407,7 +452,7 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs }) {
 
   // ---------------- control + views ----------------
   const NUM = { margin: [1, 100000], leverage: [1, 50], tpPct: [0.06, 2], slPct: [0.1, 3], scoreIn: [0.3, 0.95], bandPct: [0.05, 1], burstX: [1.2, 10],
-    wallX: [2, 30], spoofSec: [1, 20], icebergX: [1.5, 20], entryWaitSec: [2, 60], holdMaxSec: [30, 3600], maxPositions: [1, 10], cooldownSec: [0, 3600], dailyLossPct: [0.5, 20], timeStopSec: [0, 3600] };
+    wallX: [2, 30], spoofSec: [1, 20], icebergX: [1.5, 20], entryWaitSec: [2, 60], holdMaxSec: [30, 3600], maxPositions: [1, 10], cooldownSec: [0, 3600], dailyLossPct: [0.5, 20], timeStopSec: [0, 3600], coinCount: [1, 12], minTurnoverM: [5, 5000], pickEveryMin: [2, 120] };
   function setParams(o, caps = {}) {
     const changed = [];
     for (const [k, v] of Object.entries(o || {})) {
@@ -417,9 +462,9 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs }) {
         if (k === "margin" && caps.margin) hi = Math.min(hi, caps.margin);
         if (k === "leverage" && caps.leverage) hi = Math.min(hi, caps.leverage);
         n = Math.max(NUM[k][0], Math.min(hi, n));
-        if (["maxPositions", "leverage", "entryWaitSec", "holdMaxSec", "cooldownSec", "spoofSec"].includes(k)) n = Math.round(n);
+        if (["maxPositions", "leverage", "entryWaitSec", "holdMaxSec", "cooldownSec", "spoofSec", "coinCount", "pickEveryMin"].includes(k)) n = Math.round(n);
         if (P[k] !== n) { changed.push(`${k} ${P[k]}→${n}`); P[k] = n; }
-      } else if (["ride", "useIceberg", "useAbsorption", "useSpoof", "on", "needAgree", "cancelOnFade", "flipExit", "adaptive", "autoPrune"].includes(k) && typeof v === "boolean") {
+      } else if (["ride", "useIceberg", "useAbsorption", "useSpoof", "on", "needAgree", "cancelOnFade", "flipExit", "adaptive", "autoPrune", "autoCoins"].includes(k) && typeof v === "boolean") {
         if (P[k] !== v) { changed.push(`${k} ${P[k]}→${v}`); P[k] = v; }
       } else if (k === "symbols" && Array.isArray(v)) {
         const list = [...new Set(v.map(x => String(x).toUpperCase()).filter(x => /^[A-Z0-9]{2,30}USDT$/.test(x)))].slice(0, 12);
@@ -429,7 +474,7 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs }) {
     save();
     return changed;
   }
-  function setOn(on) { P.on = !!on; save(); engineLog(on ? `⚡⚡ Суперскальпінг увімкнено: ${P.symbols.join(", ")} · тейк ${P.tpPct}% лімітом · стоп ${P.slPct}%` : "⚡⚡ Суперскальпінг вимкнено (відкриті угоди доведе до кінця)", on ? "up" : "mute"); }
+  function setOn(on) { P.on = !!on; save(); if (on) pickCoins(true); engineLog(on ? `⚡⚡ Суперскальпінг увімкнено: ${P.symbols.join(", ")} · тейк ${P.tpPct}% лімітом · стоп ${P.slPct}%` : "⚡⚡ Суперскальпінг вимкнено (відкриті угоди доведе до кінця)", on ? "up" : "mute"); }
   function stats() {
     const t = ST.trades, w = t.filter(x => x.pnl > 0);
     const day = t.filter(x => x.closedAt >= Date.now() - 86400e3);
@@ -437,7 +482,7 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs }) {
       day: day.length, dayPnl: +day.reduce((a, x) => a + x.pnl, 0).toFixed(4), avgHold: t.length ? Math.round(t.reduce((a, x) => a + x.holdSec, 0) / t.length) : null };
   }
   function view() {
-    return { params: P, ws: ST.wsUp && Date.now() - ST.lastMsg < 15000, err: ST.err, stoppedForDay: ST.stoppedForDay, stats: stats(),
+    return { vol: ST.vol, pickedAt: ST.pickedAt || 0, params: P, ws: ST.wsUp && Date.now() - ST.lastMsg < 15000, err: ST.err, stoppedForDay: ST.stoppedForDay, stats: stats(),
       live: P.symbols.map(sym => Object.assign({ sym }, signals(sym) || {}, { why: (M[sym] || {}).why || "підключаюсь", peak10: +Math.max(0, ...((M[sym] || {}).peak || []).map(x => x[1])).toFixed(2) })), open: Object.values(POSN).map(p => ({ sym: p.sym, side: p.side, state: p.state, entry: p.entry || p.price, tp: p.tp || null, sl: p.sl || null, rides: p.rides || 0, sec: Math.round((Date.now() - (p.openedAt || p.at)) / 1000) })),
       trades: ST.trades.slice(-15).reverse() };
   }
@@ -445,7 +490,7 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs }) {
     // what the AI needs: parameters, results, live signals and the last trades with the signals they were taken on
     const by = (f) => { const g = {}; for (const t of ST.trades.slice(-300)) { const k = f(t); if (k == null) continue; (g[k] = g[k] || []).push(t); }
       return Object.entries(g).map(([k, a]) => ({ value: k, n: a.length, win: Math.round(a.filter(x => x.pnl > 0).length / a.length * 100), pnl: +a.reduce((s, x) => s + x.pnl, 0).toFixed(4) })); };
-    return { params: P, stats: stats(), live: P.symbols.map(sym => Object.assign({ sym }, signals(sym) || {}, { why: (M[sym] || {}).why || "", peakScore10min: +Math.max(0, ...((M[sym] || {}).peak || []).map(x => x[1])).toFixed(2) })),
+    return { volatilityTop: ST.vol, params: P, stats: stats(), live: P.symbols.map(sym => Object.assign({ sym }, signals(sym) || {}, { why: (M[sym] || {}).why || "", peakScore10min: +Math.max(0, ...((M[sym] || {}).peak || []).map(x => x[1])).toFixed(2) })),
       bySymbol: by(t => t.sym), bySignal: [].concat(by(t => t.sig && t.sig.ice ? "iceberg" : null), by(t => t.sig && t.sig.abs ? "absorption" : null), by(t => t.sig && t.sig.spoof ? "spoof" : null)),
       byTp: by(t => t.cfg && t.cfg.tpPct), byExit: by(t => t.how), last: ST.trades.slice(-20) };
   }
