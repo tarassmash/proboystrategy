@@ -613,6 +613,8 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs }) {
     wallX: [2, 30], spoofSec: [1, 20], icebergX: [1.5, 20], entryWaitSec: [2, 60], holdMaxSec: [30, 3600], maxPositions: [1, 10], cooldownSec: [0, 3600], dailyLossPct: [0, 20], timeStopSec: [0, 3600], coinCount: [1, 12], minTurnoverM: [5, 5000], pickEveryMin: [2, 120], invertMin: [10, 200], learnMin: [20, 400], optEvery: [5, 100] };
   function setParams(o, caps = {}) {
     const changed = [];
+    // coins named explicitly win over the automatic volatility pick
+    if (o && Array.isArray(o.symbols) && o.symbols.length && o.autoCoins === undefined && P.autoCoins) { o = Object.assign({}, o, { autoCoins: false }); }
     for (const [k, v] of Object.entries(o || {})) {
       if (NUM[k]) {
         let n = Number(v); if (!Number.isFinite(n)) continue;

@@ -324,16 +324,93 @@ function parseDecision(text) {
   return JSON.parse(m[0]);
 }
 
-async function askAI(ctx) {
+async function falJSON(system, prompt, maxTokens) {
   const r = await fetch(FAL_URL, {
     method: "POST",
     headers: { Authorization: "Key " + FAL_KEY, "Content-Type": "application/json" },
-    body: JSON.stringify({ model: FAL_MODEL, system_prompt: SYSTEM, prompt: "State:\n" + JSON.stringify(ctx), temperature: 0.2, max_tokens: 800 }),
+    body: JSON.stringify({ model: FAL_MODEL, system_prompt: system, prompt, temperature: 0.2, max_tokens: maxTokens || 800 }),
     signal: AbortSignal.timeout(90000),
   });
   const j = await r.json().catch(() => ({}));
   if (!r.ok || j.error) throw new Error(`fal ${r.status}: ${j.error || j.detail && JSON.stringify(j.detail).slice(0, 200) || "помилка"}`);
   return parseDecision(j.output);
+}
+// the owner's standing instructions: given to the AI in every decision
+const NOTES = () => lsGet("aiNotes", []);
+async function askAI(ctx) {
+  const notes = NOTES();
+  const sys = SYSTEM + (notes.length ? `\nThe OWNER's standing instructions (follow them; they have priority over your own preferences, but never remove stops):\n- ${notes.map(n => n.text).join("\n- ")}\n` : "");
+  return falJSON(sys, "State:\n" + JSON.stringify(ctx), 900);
+}
+
+// ---------------- owner's voice / text commands ----------------
+const CMD_SYSTEM = `You are the voice assistant of the owner's Bybit trading app. The owner speaks (or types) an instruction in Ukrainian,
+Russian or English. The text may come from speech recognition with mistakes, or be typed on a Ukrainian/Russian keyboard while
+meaning Latin transliteration (e.g. "ыефке" = "start", "вщифм" = "dobav") - decode it. Turn it into actions the app can do now.
+Available actions (use only what the owner asked for):
+ "bot": "start" | "stop"                    (autopilot of the breakout bot; stop also cancels its waiting orders)
+ "scalp": true | false                      (scalping preset of the breakout bot)
+ "ai": true | false                         (AI autopilot on/off)
+ "superscalp": {"on":true|false, "symbols":[...], "params":{tpPct,slPct,scoreIn,maxPositions,margin,leverage,autoCoins,coinCount,minTurnoverM,invert,learn,optExits,dailyLossPct,...}}
+ "settings": {breakout bot settings: margin, leverage, maxSetups, maxMode, tpPct, slPct, tpR, chase, chaseAt, chaseGap, chaseStep, scanMin, refreshMin, tf, squeeze, maxEr, ...}
+ "limits": {"maxLeverage": n, "maxMargin": n}   (caps the AI autopilot may not exceed - only when the owner explicitly asks)
+ "optimize": "breakout" | "superscalp" | "both"
+ "close": ["SYMBOL"]  "cancel": ["SYMBOL"]  "open": [{"symbol":"SOLUSDT","side":"Buy|Sell"}]
+ "remember": "a standing instruction for the AI autopilot, in Ukrainian" (only for rules about the future, e.g. "be more careful", "trade only BTC")
+ "forget": true  (clear all remembered standing instructions)
+Answer with ONE JSON object: {"actions":{...}, "summary":"what will be done, in Ukrainian, short list", "question":"ask only if the instruction is unclear, else empty"}`;
+const PLANS = new Map();
+async function command(text) {
+  if (!FAL_KEY) throw new Error("Для голосових команд потрібен FAL_KEY у Railway → Variables");
+  const ctx = {
+    instruction: String(text).slice(0, 1500),
+    now: { botRunning: !!ev("RUN"), autopilot: !!ev("CFG.autopilot"), scalp: !!ev("CFG.scalp"), aiOn: AI.on,
+      settings: JSON.parse(ev(`JSON.stringify({ margin: CFG.margin, leverage: CFG.leverage, maxSetups: CFG.maxSetups, maxMode: CFG.maxMode, tpPct: CFG.tpPct, slPct: CFG.slPct, tpR: CFG.tpR, chase: CFG.chase, scanMin: CFG.scanMin, tf: CFG.tf })`) || "{}"),
+      superscalp: SS.params, limits: { maxLeverage: AI.maxLev, maxMargin: AI.maxMargin }, remembered: NOTES().map(n => n.text),
+      positions: JSON.parse(ev("JSON.stringify(POS.map(p => p.symbol + ' ' + p.side))") || "[]") },
+  };
+  const d = await falJSON(CMD_SYSTEM, JSON.stringify(ctx), 700);
+  const id = Date.now().toString(36);
+  PLANS.set(id, { at: Date.now(), text, d });
+  for (const [k, v] of PLANS) if (Date.now() - v.at > 600000) PLANS.delete(k);
+  return { id, summary: d.summary || "", question: d.question || "", actions: d.actions || {} };
+}
+async function applyCommand(id) {
+  const plan = PLANS.get(id);
+  if (!plan) throw new Error("План застарів — скажіть ще раз");
+  PLANS.delete(id);
+  const a = plan.d.actions || {}, done = [];
+  if (a.limits && typeof a.limits === "object") {
+    if (Number(a.limits.maxLeverage) > 0) { AI.maxLev = Math.min(100, Math.round(Number(a.limits.maxLeverage))); done.push(`межа плеча для AI x${AI.maxLev}`); }
+    if (Number(a.limits.maxMargin) > 0) { AI.maxMargin = Number(a.limits.maxMargin); done.push(`межа маржі для AI ${AI.maxMargin} USDT`); }
+    saveAI();
+  }
+  if (a.bot === "stop") { await act("stop"); done.push("бота зупинено"); }
+  if (a.bot === "start") { done.push("бот: " + await act("start")); }
+  if (typeof a.scalp === "boolean" && a.scalp !== !!ev("CFG.scalp")) { await act("scalp"); done.push(a.scalp ? "скальпінг увімкнено" : "скальпінг вимкнено"); }
+  // settings, super scalping, close/cancel/open: the same safe path as the AI autopilot (caps from limits above)
+  if (a.settings || a.superscalp || a.close || a.cancel || a.open) {
+    const savedLev = AI.maxLev, savedMargin = AI.maxMargin;
+    // the owner's own command may raise leverage/margin of the breakout bot directly
+    if (a.settings && Number(a.settings.leverage) > 0) AI.maxLev = Math.max(AI.maxLev || 0, Math.round(Number(a.settings.leverage)));
+    if (a.settings && Number(a.settings.margin) > 0) AI.maxMargin = Math.max(AI.maxMargin || 0, Number(a.settings.margin));
+    if (a.superscalp && a.superscalp.params) {
+      if (Number(a.superscalp.params.leverage) > 0) AI.maxLev = Math.max(AI.maxLev || 0, Math.round(Number(a.superscalp.params.leverage)));
+      if (Number(a.superscalp.params.margin) > 0) AI.maxMargin = Math.max(AI.maxMargin || 0, Number(a.superscalp.params.margin));
+    }
+    const ch = await applyDecision({ mode: null, settings: a.settings || {}, superscalp: a.superscalp, close: a.close, cancel: a.cancel, open: a.open });
+    AI.maxLev = savedLev; AI.maxMargin = savedMargin; saveAI();
+    done.push(...ch);
+  }
+  if (typeof a.ai === "boolean" && a.ai !== AI.on) done.push("AI: " + await act("ai"));
+  if (a.optimize === "breakout" || a.optimize === "both") done.push(optimizeNow("голосом"));
+  if (a.optimize === "superscalp" || a.optimize === "both") done.push(await act("ssopt"));
+  if (a.forget) { lsSet("aiNotes", []); done.push("постійні вказівки AI очищено"); }
+  if (a.remember) { const n = NOTES(); n.push({ at: Date.now(), text: String(a.remember).slice(0, 300) }); lsSet("aiNotes", n.slice(-20)); done.push(`AI запам'ятав: «${String(a.remember).slice(0, 120)}»`); }
+  dumpStorage();
+  const text = done.length ? done.join("; ") : "Нічого не змінено";
+  engineLog(`🎙 Команда власника: «${String(plan.text).slice(0, 120)}» → ${text}`, "up");
+  return text;
 }
 
 async function applyDecision(d) {
@@ -474,7 +551,7 @@ function state() {
     ai: { on: AI.on, busy: AI.busy, key: !!FAL_KEY, model: FAL_MODEL, every: AI_EVERY, error: AI.error, maxLev: AI.maxLev,
       next: AI.on ? Math.max(0, Math.round((AI.last + AI_EVERY * 60000 - Date.now()) / 1000)) : null, history: AI.history.slice(-5).reverse() },
     aiPause: !!ev("CFG.aiPause"),
-    perf: perf(), autoOpt: AUTO_OPT(), progress: progress(), ss: SS.view(),
+    perf: perf(), autoOpt: AUTO_OPT(), progress: progress(), ss: SS.view(), notes: NOTES(),
     lastBybitSec: ACT.last ? Math.round((Date.now() - ACT.last) / 1000) : -1, upMin: Math.round((Date.now() - ACT.started) / 60000),
     stats: {
       all: tr.length, pnl: tr.reduce((a, t) => a + t.pnl, 0), win: tr.length ? Math.round(tr.filter(t => t.pnl > 0).length / tr.length * 100) : null,
@@ -545,6 +622,8 @@ const PAGE = `<!doctype html><html lang="uk"><head><meta charset="utf-8"><meta n
 .big{width:100%;min-height:72px;border-radius:16px;border:0;font-size:22px;font-weight:700;cursor:pointer}
 .go{background:var(--up);color:#06281b}.stop{background:var(--down);color:#fff}.sc{background:transparent;border:2px solid var(--gold);color:var(--gold);min-height:60px;font-size:18px}.sc.on{background:var(--gold);color:#111}
 .ai{background:transparent;border:2px solid #a78bfa;color:#c4b5fd;min-height:60px;font-size:18px}.ai.on{background:#7c3aed;border-color:#7c3aed;color:#fff}
+.mic{width:52px;min-height:48px;border-radius:12px;border:2px solid #a78bfa;background:transparent;font-size:22px;cursor:pointer}.mic.rec{background:#dc2626;border-color:#dc2626;animation:pulse 1s infinite}
+@keyframes pulse{50%{opacity:.6}}
 .mini{min-height:36px;border-radius:10px;border:1px solid var(--line);background:var(--bg);color:var(--ink);padding:0 10px;font-size:12px;cursor:pointer}.mini.on{border-color:var(--up);color:var(--up)}
 .chip{display:inline-block;border:1px solid var(--line);border-radius:6px;padding:1px 6px;margin:2px;font:11px ui-monospace,monospace}
 .ss{background:transparent;border:2px solid #22d3ee;color:#67e8f9;min-height:60px;font-size:18px}.ss.on{background:#0891b2;border-color:#0891b2;color:#fff}
@@ -556,6 +635,11 @@ table{width:100%;border-collapse:collapse;font-size:13px}td,th{padding:6px 4px;b
 .note{border-radius:12px;padding:10px 12px;margin-top:12px;font-size:13px}.warn{background:rgba(246,70,93,.1);border:1px solid rgba(246,70,93,.4)}
 </style></head><body><div class="wrap">
 <h1>Proboy Autopilot</h1><div class="mute" id="sub">Бот працює на сервері 24/7 — сторінку можна закрити</div>
+<div class="card"><b>🎙 Скажіть AI, що зробити</b>
+<div style="display:flex;gap:8px;margin-top:8px"><button class="mic" id="mic" title="Натисніть і говоріть">🎙</button>
+<input id="cmd" placeholder="наприклад: увімкни суперскальпінг тільки на BTC і ETH, тейк 0.3" style="flex:1;min-height:48px;border-radius:12px;border:1px solid var(--line);background:var(--bg);color:var(--ink);padding:0 12px;font-size:15px">
+<button class="mini" id="send" style="min-height:48px">➤</button></div>
+<div id="plan" style="font-size:14px;margin-top:8px"></div><div id="notes" style="font-size:12px;margin-top:6px" class="mute"></div></div>
 <div class="card"><div style="font-size:18px;font-weight:600"><span class="dot" id="dot"></span><span id="status">…</span></div>
 <div class="mute" id="status2" style="margin-top:4px"></div>
 <div style="margin-top:14px"><button class="big go" id="main">▶ Запустити</button></div>
@@ -608,6 +692,8 @@ $("perfSum").innerHTML=P.total?("Угод "+P.total+" · win "+P.win+"% · PnL "
 $("perfRows").innerHTML=(P.params||[]).filter(p=>p.rows.length).map(p=>'<div style="margin-top:6px;font-size:13px"><b>'+esc(p.name)+"</b>"+(p.best?' · <span class="up">найкраще '+esc(p.best.value)+"</span>":"")+"<br>"+p.rows.map(r=>'<span class="chip '+(r.avgRoi>=0?"up":"down")+'">'+esc(r.value)+": "+(r.avgRoi>=0?"+":"")+r.avgRoi+"% · "+r.n+" уг. · "+r.win+"%</span>").join("")+"</div>").join("")+((P.byExit||[]).length?'<div style="margin-top:6px;font-size:13px"><b>Чим закрились</b><br>'+P.byExit.map(r=>'<span class="chip '+(r.pnl>=0?"up":"down")+'">'+esc(r.value)+": "+r.n+" · "+(r.pnl>=0?"+":"")+r.pnl+"</span>").join("")+"</div>":"")+((P.byHour||[]).length?'<div style="margin-top:6px;font-size:13px"><b>Години</b><br>'+P.byHour.map(r=>'<span class="chip '+(r.pnl>=0?"up":"down")+'">'+esc(r.value)+": "+r.n+" · "+(r.pnl>=0?"+":"")+r.pnl+"</span>").join("")+"</div>":"");
 $("autoopt").className="mini"+(S.autoOpt?" on":"");$("autoopt").textContent=S.autoOpt?"Авто раз на добу: увімк":"Авто раз на добу";
 drawProgress(S.progress||{});
+$("notes").innerHTML=(S.notes||[]).length?"Постійні вказівки AI: "+S.notes.map((n,i)=>"«"+esc(n.text)+'» <a href="#" data-del="'+i+'" style="color:var(--down)">✕</a>').join(" · "):"";
+document.querySelectorAll("[data-del]").forEach(a=>a.onclick=async(e)=>{e.preventDefault();await fetch("/api/notes/del",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({i:Number(a.dataset.del)})});load()});
 const X=S.ss||{},XP=X.params||{},XS=X.stats||{};const sb=$("ss");sb.className="big ss"+(XP.on?" on":"");sb.disabled=busy;
 sb.textContent=XP.on?"⚡⚡ Суперскальпінг увімкнено":"⚡⚡ Суперскальпінг (стакан)";
 $("ssLine").innerHTML=(XP.on?'<span style="color:#67e8f9">':'<span class="mute">')+"Стакан, стрічка, айсберги, поглинання, спуфінг · вхід і тейк лімітками · тейк "+XP.tpPct+"% · стоп "+XP.slPct+"% · до "+XP.maxPositions+" угод · "+(X.ws?"дані наживо ✓":"підключаюсь до біржі…")+(X.stoppedForDay?' · <b class="down">денний ліміт збитку — пауза до завтра</b>':"")+(X.noMoney?'<br><b class="down">⏸ '+esc(X.noMoney)+"</b> — звільніть кошти (менше заявок основного бота або менша маржа), бот спробує знову через хвилину":"")+"</span>"+(X.err?'<br><span class="down">'+esc(X.err)+"</span>":"");
@@ -654,6 +740,25 @@ else s2='<text x="12" y="75" fill="#848e9c" font-size="13">Перший резу
 $("decChart").innerHTML=s2;}
 $("ssOpt").onclick=()=>act("ssopt","");
 $("ss").onclick=()=>act("ss",S&&S.ss&&!S.ss.params.on?"Увімкнути суперскальпінг за стаканом? Вхід і тейк лімітками, стоп на біржі, до "+S.ss.params.maxPositions+" угод одночасно"+(S.ss.params.dailyLossPct>0?", денний ліміт збитку "+S.ss.params.dailyLossPct+"%":", без денного ліміту")+".":"");
+// ---- voice / text commands ----
+let PLAN=null;
+const speak=(t)=>{try{const u=new SpeechSynthesisUtterance(t);u.lang="uk-UA";speechSynthesis.cancel();speechSynthesis.speak(u)}catch(e){}};
+async function sendCmd(text){text=(text||"").trim();if(!text)return;$("plan").innerHTML='<span class="mute">AI розбирає команду…</span>';
+try{const r=await fetch("/api/command",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({text})}).then(r=>r.json());
+if(r.error){$("plan").innerHTML='<span class="down">'+esc(r.error)+"</span>";return}
+PLAN=r;$("plan").innerHTML='<div style="border:1px solid #7c3aed;border-radius:12px;padding:10px"><b style="color:#c4b5fd">План:</b> '+esc(r.summary||"—")+(r.question?'<br><span class="gold">'+esc(r.question)+"</span>":"")+'<div style="margin-top:8px;display:flex;gap:8px"><button class="mini on" id="doit">✓ Виконати</button><button class="mini" id="nope">Скасувати</button></div></div>';
+speak(r.question||("План: "+(r.summary||"")+". Виконати?"));
+$("doit").onclick=async()=>{$("plan").innerHTML='<span class="mute">Виконую…</span>';const a=await fetch("/api/command/apply",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id:PLAN.id})}).then(r=>r.json());$("plan").innerHTML=a.error?'<span class="down">'+esc(a.error)+"</span>":'<span class="up">✓ '+esc(a.text)+"</span>";speak(a.error||"Готово");$("cmd").value="";load()};
+$("nope").onclick=()=>{PLAN=null;$("plan").innerHTML=""}}
+catch(e){$("plan").innerHTML='<span class="down">Немає зв&#39;язку з сервером</span>'}}
+$("send").onclick=()=>sendCmd($("cmd").value);
+$("cmd").addEventListener("keydown",e=>{if(e.key==="Enter")sendCmd($("cmd").value)});
+const SR=window.SpeechRecognition||window.webkitSpeechRecognition;let rec=null;
+$("mic").onclick=()=>{if(!SR){alert("Цей браузер не розпізнає голос. Відкрийте в Chrome / Edge / Safari або напишіть текстом.");return}
+if(rec){rec.stop();return}
+rec=new SR();rec.lang="uk-UA";rec.interimResults=true;rec.continuous=false;$("mic").classList.add("rec");
+rec.onresult=e=>{let t="";for(const r of e.results)t+=r[0].transcript;$("cmd").value=t;if(e.results[e.results.length-1].isFinal){sendCmd(t)}};
+rec.onerror=e=>{$("plan").innerHTML='<span class="down">Мікрофон: '+esc(e.error)+"</span>"};rec.onend=()=>{rec=null;$("mic").classList.remove("rec")};rec.start()};
 $("opt").onclick=()=>act("optimize","Застосувати найприбутковіші налаштування за статистикою угод?");
 $("autoopt").onclick=()=>act("autoopt","");
 $("scalp").onclick=()=>act("scalp",S&&!S.scalp?"Увімкнути скальпінг? Тейк +0.5%, стоп −1% від входу. Діє на нові заявки.":"");
@@ -675,6 +780,16 @@ http.createServer(async (req, res) => {
   if (!authorised(req)) { res.writeHead(401, { "WWW-Authenticate": 'Basic realm="Proboy Autopilot"' }); return res.end("Потрібен пароль (UI_PASSWORD)"); }
   try {
     if (url.pathname === "/api/state") return json(200, state());
+    if (req.method === "POST" && (url.pathname === "/api/command" || url.pathname === "/api/command/apply" || url.pathname === "/api/notes/del")) {
+      if (!PASSWORD) return json(200, { error: "Задайте UI_PASSWORD у Railway → Variables, щоб керувати ботом" });
+      let raw = ""; for await (const c of req) { raw += c; if (raw.length > 20000) break; }
+      const b = JSON.parse(raw || "{}");
+      try {
+        if (url.pathname === "/api/command") return json(200, await command(b.text || ""));
+        if (url.pathname === "/api/notes/del") { lsSet("aiNotes", NOTES().filter((_, i) => i !== Number(b.i))); dumpStorage(); return json(200, { ok: true }); }
+        return json(200, { text: await applyCommand(b.id) });
+      } catch (e) { return json(200, { error: String(e && e.message || e) }); }
+    }
     if (req.method === "POST" && /^\/api\/(start|stop|scalp|ai|optimize|autoopt|ss|ssopt)$/.test(url.pathname)) {
       if (!PASSWORD) return json(200, { text: "Задайте UI_PASSWORD у Railway → Variables, щоб керувати ботом" });
       return json(200, { text: await act(url.pathname.split("/").pop()) });
