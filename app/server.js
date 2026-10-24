@@ -168,12 +168,83 @@ function botContext() {
   })`) || "{}");
 }
 
+// ---------------- what makes money: results grouped by the settings each trade was opened with ----------------
+const OPT_MIN = Math.max(2, Number(process.env.OPTIMIZE_MIN_TRADES || 5));
+const OPT_KEYS = [
+  ["style", "Стиль", (c) => c.style],
+  ["tpPct", "Тейк, %", (c) => c.style === "scalp" ? c.tpPct : null],
+  ["slPct", "Стоп, %", (c) => c.slMode === "pct" ? c.slPct : null],
+  ["tpR", "Тейк, R", (c) => c.style !== "scalp" ? c.tpR : null],
+  ["chaseAt", "Імпульс: старт", (c) => c.chase !== "off" ? c.chaseAt : null],
+  ["chaseGap", "Імпульс: стоп позаду", (c) => c.chase !== "off" ? c.chaseGap : null],
+  ["chaseStep", "Імпульс: крок тейку", (c) => c.chase !== "off" ? c.chaseStep : null],
+  ["squeeze", "Фільтр стиснення", (c) => c.squeeze],
+  ["relax", "Послаблення фільтрів", (c) => c.relax],
+];
+function perf() {
+  const trades = JSON.parse(ev(`JSON.stringify(JOURNAL.filter(j => !j.noTrade).slice(-1000))`) || "[]");
+  const withCfg = trades.filter(t => t.cfg);
+  const roi = (t) => t.roi != null ? t.roi : (t.cfg && t.cfg.margin ? t.pnl / t.cfg.margin * 100 : 0);
+  const sum = (a, f) => a.reduce((x, t) => x + f(t), 0);
+  const params = OPT_KEYS.map(([key, name, get]) => {
+    const g = {};
+    for (const t of withCfg) { const v = get(t.cfg); if (v == null) continue; (g[v] = g[v] || []).push(t); }
+    const rows = Object.entries(g).map(([v, ts]) => ({
+      value: isNaN(Number(v)) ? v : Number(v), n: ts.length, win: Math.round(ts.filter(t => t.pnl > 0).length / ts.length * 100),
+      avgRoi: +(sum(ts, roi) / ts.length).toFixed(2), pnl: +sum(ts, t => t.pnl).toFixed(4),
+    })).sort((a, b) => b.avgRoi - a.avgRoi);
+    const good = rows.filter(r => r.n >= OPT_MIN && r.avgRoi > 0);
+    return { key, name, rows: rows.slice(0, 6), best: good[0] || null };
+  });
+  const byExit = {};
+  for (const t of trades) { const k = t.result || "—"; (byExit[k] = byExit[k] || []).push(t); }
+  const hours = {};
+  for (const t of trades) { if (t.hour == null) continue; const b = Math.floor(t.hour / 6) * 6; const k = `${b}-${b + 6} UTC`; (hours[k] = hours[k] || []).push(t); }
+  const pack = (o) => Object.entries(o).map(([k, ts]) => ({ value: k, n: ts.length, win: Math.round(ts.filter(t => t.pnl > 0).length / ts.length * 100), pnl: +sum(ts, t => t.pnl).toFixed(4) })).sort((a, b) => b.pnl - a.pnl);
+  const wins = trades.filter(t => t.pnl > 0), losses = trades.filter(t => t.pnl < 0);
+  return {
+    total: trades.length, withSettings: withCfg.length, minTrades: OPT_MIN,
+    win: trades.length ? Math.round(wins.length / trades.length * 100) : null,
+    pnl: +sum(trades, t => t.pnl).toFixed(4),
+    profitFactor: losses.length ? +(sum(wins, t => t.pnl) / Math.abs(sum(losses, t => t.pnl))).toFixed(2) : null,
+    avgWinMovePct: wins.length ? +(sum(wins, t => t.movePct || 0) / wins.length).toFixed(2) : null,
+    avgImpulseMaxPct: trades.some(t => t.maxGain) ? +(sum(trades.filter(t => t.maxGain), t => t.maxGain) / trades.filter(t => t.maxGain).length).toFixed(2) : null,
+    params, byExit: pack(byExit), byHour: pack(hours),
+  };
+}
+// apply the most profitable value of every setting (only with enough trades and a positive average)
+function optimizeNow(source) {
+  const P = perf();
+  const cur = JSON.parse(ev("JSON.stringify(CFG)"));
+  const changes = [];
+  const style = P.params.find(p => p.key === "style").best;
+  if (style && (style.value === "scalp") !== !!cur.scalp) { ev(`applyPreset(${JSON.stringify(style.value === "scalp" ? "scalp" : "normal")})`); changes.push(`стиль → ${style.value === "scalp" ? "скальпінг" : "пробої"} (${style.avgRoi}% на угоду, ${style.n} угод)`); }
+  const fresh = JSON.parse(ev("JSON.stringify(CFG)"));
+  const set = {};
+  for (const p of P.params) {
+    if (!p.best || p.key === "style" || p.key === "relax" || !LIMITS[p.key]) continue;
+    const v = Math.min(LIMITS[p.key][1], Math.max(LIMITS[p.key][0], Number(p.best.value)));
+    const curRow = p.rows.find(r => r.value === fresh[p.key]);
+    if (v !== fresh[p.key] && (!curRow || p.best.avgRoi > curRow.avgRoi)) { set[p.key] = v; changes.push(`${p.name} ${fresh[p.key]} → ${v} (${p.best.avgRoi}% на угоду, ${p.best.n} угод, win ${p.best.win}%)`); }
+  }
+  if (Object.keys(set).length) ev(`Object.assign(CFG, ${JSON.stringify(set)}); LS.set("settings", CFG); buildSettings(); paintAuto();`);
+  const text = changes.length ? `📈 Оптимізація (${source}, ${P.withSettings} угод): ` + changes.join("; ") : `📈 Оптимізація (${source}): змін немає — поточні налаштування вже найкращі або замало угод (треба ${OPT_MIN}+ з одним значенням)`;
+  engineLog(text, changes.length ? "up" : "mute");
+  lsSet("optLast", Date.now());
+  return text;
+}
+const AUTO_OPT = () => !!lsGet("autoOpt", false);
+setInterval(() => { if (AUTO_OPT() && !AI.on && Date.now() - lsGet("optLast", 0) >= 24 * 3600e3) { try { optimizeNow("авто раз на добу"); dumpStorage(); } catch (e) { log("optimize:", e.message); } } }, 10 * 60000);
+
 const SYSTEM = `You are the risk-aware autopilot of a Bybit USDT-perpetual breakout bot. Every few minutes you receive the market state,
 the bot's settings, open positions and the last closed trades, and you decide how the bot should trade for the next period.
 The bot places Buy Stop above and Sell Stop below squeezed ranges; "scalp" = 5-minute ranges with a fixed take/stop in % of the entry;
 "breakout" = 15-minute ranges with take in R (multiples of the risk). The impulse trailing (chase) moves the stop behind the price and pushes
 the take further once chaseAt of the way to the take is covered.
 Goals: positive expectancy after fees (~0.11% round trip), protect the account first, adapt to the regime (calm range vs trend vs high volatility).
+You also get "performance": closed trades grouped by the settings they were opened with (n = trades, avgRoi = average result in % of
+the trade margin, win = win rate). Prefer values that made money with n >= minTrades; move away from values that lose; with few trades
+change settings carefully, one or two at a time.
 Rules: take profit must be larger than fees; in scalp keep tpPct >= 0.3; a losing streak or a chaotic market is a reason to pause new entries
 ("pause") or to use stricter filters; never suggest removing stops. Close a position only with a clear reason (e.g. the move is exhausted while in profit).
 Answer with ONE JSON object only, no text around it:
@@ -245,7 +316,7 @@ async function aiTick(force) {
   if (!FAL_KEY) { AI.error = "немає FAL_KEY у Railway → Variables"; return; }
   AI.busy = true; AI.last = Date.now();
   try {
-    const ctx = Object.assign({ time: new Date().toISOString() }, await marketContext(), botContext());
+    const ctx = Object.assign({ time: new Date().toISOString() }, await marketContext(), botContext(), { performance: perf() });
     const d = await askAI(ctx);
     const changes = await applyDecision(d);
     const item = { at: Date.now(), regime: d.regime || "", mode: d.mode || "", reason: String(d.reason || "").slice(0, 400), changes };
@@ -278,6 +349,7 @@ function state() {
     ai: { on: AI.on, busy: AI.busy, key: !!FAL_KEY, model: FAL_MODEL, every: AI_EVERY, error: AI.error, maxLev: AI.maxLev,
       next: AI.on ? Math.max(0, Math.round((AI.last + AI_EVERY * 60000 - Date.now()) / 1000)) : null, history: AI.history.slice(-5).reverse() },
     aiPause: !!ev("CFG.aiPause"),
+    perf: perf(), autoOpt: AUTO_OPT(),
     lastBybitSec: ACT.last ? Math.round((Date.now() - ACT.last) / 1000) : -1, upMin: Math.round((Date.now() - ACT.started) / 60000),
     stats: {
       all: tr.length, pnl: tr.reduce((a, t) => a + t.pnl, 0), win: tr.length ? Math.round(tr.filter(t => t.pnl > 0).length / tr.length * 100) : null,
@@ -311,6 +383,11 @@ async function act(what) {
       saveAI();
     }
     return "OK";
+  } else if (what === "optimize") {
+    return optimizeNow("кнопка");
+  } else if (what === "autoopt") {
+    lsSet("autoOpt", !AUTO_OPT()); dumpStorage();
+    return AUTO_OPT() ? "Авто-оптимізація раз на добу увімкнена (коли AI вимкнено; з AI оптимізує сам AI)" : "Авто-оптимізацію вимкнено";
   } else if (what === "scalp") {
     ev(`applyPreset(CFG.scalp ? "normal" : "scalp")`);
   } else return "Невідома дія";
@@ -331,6 +408,8 @@ const PAGE = `<!doctype html><html lang="uk"><head><meta charset="utf-8"><meta n
 .big{width:100%;min-height:72px;border-radius:16px;border:0;font-size:22px;font-weight:700;cursor:pointer}
 .go{background:var(--up);color:#06281b}.stop{background:var(--down);color:#fff}.sc{background:transparent;border:2px solid var(--gold);color:var(--gold);min-height:60px;font-size:18px}.sc.on{background:var(--gold);color:#111}
 .ai{background:transparent;border:2px solid #a78bfa;color:#c4b5fd;min-height:60px;font-size:18px}.ai.on{background:#7c3aed;border-color:#7c3aed;color:#fff}
+.mini{min-height:36px;border-radius:10px;border:1px solid var(--line);background:var(--bg);color:var(--ink);padding:0 10px;font-size:12px;cursor:pointer}.mini.on{border-color:var(--up);color:var(--up)}
+.chip{display:inline-block;border:1px solid var(--line);border-radius:6px;padding:1px 6px;margin:2px;font:11px ui-monospace,monospace}
 .big:disabled{opacity:.5;cursor:default}.row{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px}
 .k b{display:block;font:600 18px ui-monospace,monospace}.k span{font-size:12px;color:var(--mute)}
 .dot{display:inline-block;width:10px;height:10px;border-radius:50%;background:var(--mute);margin-right:6px}.dot.on{background:var(--up);box-shadow:0 0 10px var(--up)}
@@ -353,6 +432,9 @@ table{width:100%;border-collapse:collapse;font-size:13px}td,th{padding:6px 4px;b
 <div class="k"><span>Сьогодні угод / PnL</span><b id="td">—</b></div><div class="k"><span>Усього угод · win</span><b id="all">—</b></div></div>
 <div class="card"><b>Позиції</b><div class="scroll"><table><thead><tr><th>Монета</th><th>Бік</th><th>Вхід</th><th>Ціна</th><th>PnL</th><th>Стоп / Тейк</th><th>Імпульс</th></tr></thead><tbody id="pos"></tbody></table></div></div>
 <div class="card"><b>Заявки бота на біржі</b><div class="scroll"><table><thead><tr><th>Монета</th><th>Стан</th><th>Buy Stop</th><th>Sell Stop</th></tr></thead><tbody id="set"></tbody></table></div></div>
+<div class="card"><div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap"><b>📈 Що приносить прибуток</b>
+<span><button class="mini" id="opt">Застосувати найприбутковіші</button> <button class="mini" id="autoopt">Авто раз на добу</button></span></div>
+<div class="mute" id="perfSum" style="font-size:13px;margin-top:6px"></div><div id="perfRows" style="margin-top:6px"></div></div>
 <div class="card" id="aiCard" style="display:none"><b>🧠 Рішення AI</b><div id="aiHist" class="log"></div></div>
 <div class="card"><b>Що робить бот</b><div class="log" id="log"></div></div>
 <div class="mute" style="font-size:12px;margin:14px 0" id="foot"></div>
@@ -372,6 +454,10 @@ $("aiLine").innerHTML=!A.key?'<span class="down">Для AI додайте FAL_KE
 $("aiCard").style.display=(A.history||[]).length?"":"none";
 $("aiHist").innerHTML=(A.history||[]).map(h=>"<div>"+new Date(h.at).toLocaleTimeString()+' · <b style="color:#c4b5fd">'+esc(h.regime)+" · "+esc(h.mode)+"</b> — "+esc(h.reason)+(h.changes&&h.changes.length?'<br><span class="up">'+esc(h.changes.join("; "))+"</span>":"")+"</div>").join("");
 $("scalpHint").textContent="Скальпінг: короткі угоди, тейк +"+(S.scalp?S.tp:0.5)+"%, стоп −"+(S.scalp?S.sl:1)+"% від входу, скан щохвилини.";
+const P=S.perf||{};
+$("perfSum").innerHTML=P.total?("Угод "+P.total+" · win "+P.win+"% · PnL "+(P.pnl>=0?'<span class="up">+':'<span class="down">')+f(P.pnl,4)+"</span> USDT"+(P.profitFactor!=null?" · PF "+P.profitFactor:"")+(P.avgWinMovePct!=null?" · середній виграш +"+P.avgWinMovePct+"%":"")+(P.avgImpulseMaxPct!=null?" · середній імпульс +"+P.avgImpulseMaxPct+"%":"")+" · з налаштуваннями "+P.withSettings+" (для висновку треба "+P.minTrades+"+ угод з одним значенням)"):"Ще немає закритих угод — статистика з'явиться після перших угод.";
+$("perfRows").innerHTML=(P.params||[]).filter(p=>p.rows.length).map(p=>'<div style="margin-top:6px;font-size:13px"><b>'+esc(p.name)+"</b>"+(p.best?' · <span class="up">найкраще '+esc(p.best.value)+"</span>":"")+"<br>"+p.rows.map(r=>'<span class="chip '+(r.avgRoi>=0?"up":"down")+'">'+esc(r.value)+": "+(r.avgRoi>=0?"+":"")+r.avgRoi+"% · "+r.n+" уг. · "+r.win+"%</span>").join("")+"</div>").join("")+((P.byExit||[]).length?'<div style="margin-top:6px;font-size:13px"><b>Чим закрились</b><br>'+P.byExit.map(r=>'<span class="chip '+(r.pnl>=0?"up":"down")+'">'+esc(r.value)+": "+r.n+" · "+(r.pnl>=0?"+":"")+r.pnl+"</span>").join("")+"</div>":"")+((P.byHour||[]).length?'<div style="margin-top:6px;font-size:13px"><b>Години</b><br>'+P.byHour.map(r=>'<span class="chip '+(r.pnl>=0?"up":"down")+'">'+esc(r.value)+": "+r.n+" · "+(r.pnl>=0?"+":"")+r.pnl+"</span>").join("")+"</div>":"");
+$("autoopt").className="mini"+(S.autoOpt?" on":"");$("autoopt").textContent=S.autoOpt?"Авто раз на добу: увімк":"Авто раз на добу";
 $("chaseLine").innerHTML=S.chase?'<span class="up">🚀 Трейлінг стопа і тейку увімкнено</span> <span class="mute">— після '+Math.round(S.chaseAt*100)+"% шляху до тейку стоп іде за ціною, а тейк відсувається далі в бік руху, щоб забрати весь імпульс</span>":'<span class="mute">Трейлінг стопа і тейку вимкнено</span>';
 $("warn").innerHTML=w.map(x=>'<div class="note warn">'+esc(x)+"</div>").join("");
 $("eq").textContent=f(S.acc.equity);$("av").textContent=f(S.acc.available);
@@ -384,6 +470,8 @@ $("foot").textContent=S.env+" · "+S.net.text+" · останній запит �
 async function act(what,q){if(q&&!confirm(q))return;busy=true;paint();try{const r=await fetch("/api/"+what,{method:"POST"}).then(r=>r.json());if(r.text&&r.text!=="OK")alert(r.text)}catch(e){alert("Немає зв'язку з сервером")}busy=false;await load()}
 $("main").onclick=()=>{const on=S&&S.run&&S.auto;on?act("stop","Зупинити бота? Заявки бота, що чекають пробою, буде знято. Відкриті позиції лишаться зі своїм стопом і тейком."):act("start",S&&S.env==="mainnet"?"Запустити торгівлю на реальному рахунку?":"")};
 $("ai").onclick=()=>act("ai",S&&S.ai&&!S.ai.on?"Увімкнути AI-автопілот? AI сам керуватиме стилем торгівлі, тейком, стопом, фільтрами і може закривати позиції. Маржу не змінює, плече не піднімає вище поточного. Прибуток не гарантовано.":"");
+$("opt").onclick=()=>act("optimize","Застосувати найприбутковіші налаштування за статистикою угод?");
+$("autoopt").onclick=()=>act("autoopt","");
 $("scalp").onclick=()=>act("scalp",S&&!S.scalp?"Увімкнути скальпінг? Тейк +0.5%, стоп −1% від входу. Діє на нові заявки.":"");
 load();setInterval(load,3000);
 </script></body></html>`;
@@ -403,7 +491,7 @@ http.createServer(async (req, res) => {
   if (!authorised(req)) { res.writeHead(401, { "WWW-Authenticate": 'Basic realm="Proboy Autopilot"' }); return res.end("Потрібен пароль (UI_PASSWORD)"); }
   try {
     if (url.pathname === "/api/state") return json(200, state());
-    if (req.method === "POST" && /^\/api\/(start|stop|scalp|ai)$/.test(url.pathname)) {
+    if (req.method === "POST" && /^\/api\/(start|stop|scalp|ai|optimize|autoopt)$/.test(url.pathname)) {
       if (!PASSWORD) return json(200, { text: "Задайте UI_PASSWORD у Railway → Variables, щоб керувати ботом" });
       return json(200, { text: await act(url.pathname.split("/").pop()) });
     }
