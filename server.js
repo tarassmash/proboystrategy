@@ -29,6 +29,9 @@ if (process.env.BYBIT_API_KEY && process.env.BYBIT_API_SECRET) {
 }
 
 let dom;
+// activity of the bot itself: when it last talked to Bybit (works with no browser open)
+const ACT = { last: 0, count: 0, started: Date.now() };
+function running() { try { return JSON.parse(dom.window.localStorage.getItem("bx.running") || "false") === true; } catch { return false; } }
 function dumpStorage() {
   if (!dom) return;
   const ls = dom.window.localStorage, out = {};
@@ -59,6 +62,7 @@ dom = new JSDOM(PAGE, {
     const testUrl = (process.env.TEST_BYBIT_URL || "").trim();
     window.fetch = (input, init) => {
       if (testUrl && typeof input === "string") input = input.replace(/^https:\/\/api(-testnet)?\.bybit\.com/, testUrl);
+      if (typeof input === "string" && /bybit\.com|127\.0\.0\.1:9333/.test(input)) { ACT.last = Date.now(); ACT.count++; }
       return fetch(input, init);
     };
     window.Headers = Headers; window.Request = Request; window.Response = Response;
@@ -96,6 +100,7 @@ async function checkBybit() {
   log(NET.text);
 }
 setTimeout(checkBybit, 1000);
+setInterval(() => log(`heartbeat: bot ${running() ? "RUNNING" : "stopped"} · Bybit requests ${ACT.count} · last ${ACT.last ? Math.round((Date.now() - ACT.last) / 1000) + "s ago" : "never"}`), 10 * 60000);
 setInterval(checkBybit, 10 * 60000);
 
 // ---------------- snapshot of the live page ----------------
@@ -200,7 +205,9 @@ const VIEWER = `
     try {
       const r = await fetch("/__snapshot").then(x => x.json());
       const n = document.getElementById("__net");
-      if (n) { n.textContent = r.net.text; n.style.color = r.net.ok === false ? "#f6465d" : r.net.ok ? "#0ecb81" : ""; }
+      const a = r.act || {};
+      const run = a.running ? "бот працює на сервері" + (a.ago >= 0 ? " · останній запит до Bybit " + a.ago + " с тому" : "") : "бот зупинений (натисніть «Запустити бота»)";
+      if (n) { n.textContent = run + " · " + r.net.text; n.style.color = r.net.ok === false ? "#f6465d" : r.net.ok ? "#0ecb81" : ""; }
       const keep = document.getElementById("__remote");
       const y = window.scrollY;
       const open = [...document.querySelectorAll("details[open]")].map(pathOf).map(String);
@@ -234,13 +241,13 @@ http.createServer(async (req, res) => {
   const url = new URL(req.url, "http://x");
   const send = (code, body, type) => { res.writeHead(code, { "Content-Type": type, "Cache-Control": "no-store" }); res.end(body); };
   if (url.pathname === "/healthz") return send(200, "ok", "text/plain");
-  if (url.pathname === "/__net") return send(200, JSON.stringify(NET), "application/json; charset=utf-8");
+  if (url.pathname === "/__net") return send(200, JSON.stringify(Object.assign({}, NET, { running: running(), lastBybitSecAgo: ACT.last ? Math.round((Date.now() - ACT.last) / 1000) : -1, requests: ACT.count })), "application/json; charset=utf-8");
   if (!authorised(req)) {
     res.writeHead(401, { "WWW-Authenticate": 'Basic realm="proboystrategy"' });
     return res.end("Потрібен пароль (UI_PASSWORD)");
   }
   try {
-    if (url.pathname === "/__snapshot") return send(200, JSON.stringify({ body: snapshot(), net: NET }), "application/json; charset=utf-8");
+    if (url.pathname === "/__snapshot") return send(200, JSON.stringify({ body: snapshot(), net: NET, act: { ago: ACT.last ? Math.round((Date.now() - ACT.last) / 1000) : -1, count: ACT.count, running: running(), upMin: Math.round((Date.now() - ACT.started) / 60000) } }), "application/json; charset=utf-8");
     if (url.pathname === "/__act" && req.method === "POST") {
       if (!PASSWORD) return send(200, JSON.stringify({ ok: false, error: "Лише перегляд: задайте UI_PASSWORD" }), "application/json");
       let raw = "";
