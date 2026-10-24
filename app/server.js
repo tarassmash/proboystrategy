@@ -117,10 +117,10 @@ setInterval(() => log(`heartbeat: ${ev("RUN") ? "RUNNING" : "stopped"}${ev("CFG.
 function state() {
   const s = JSON.parse(ev(`JSON.stringify({
     run: RUN, auto: !!CFG.autopilot, scalp: !!CFG.scalp, tp: CFG.tpPct, sl: CFG.slPct, margin: CFG.margin, lev: CFG.leverage,
-    scanMin: CFG.scanMin, maxSetups: AP.slots || CFG.maxSetups, byBalance: CFG.maxMode !== "fixed", refreshMin: CFG.refreshMin, relax: AP.relax || 0, added: AP.added || 0,
+    scanMin: CFG.scanMin, maxSetups: AP.slots || CFG.maxSetups, byBalance: CFG.maxMode !== "fixed", refreshMin: CFG.refreshMin, chase: CFG.chase !== "off", chaseAt: CFG.chaseAt, relax: AP.relax || 0, added: AP.added || 0,
     nextScan: RUN ? Math.max(0, Math.round((lastScan + CFG.scanMin * 60e3 - Date.now()) / 1000)) : null,
     setups: SETUPS.map(s => ({ symbol: s.symbol, state: s.state, kind: s.kind, now: !!s.now, buy: s.buy && s.buy.trigger, sell: s.sell && s.sell.trigger, entry: s.entry || null })),
-    pos: POS.map(p => ({ symbol: p.symbol, side: p.side, size: p.size, entry: p.avgPrice, mark: p.markPrice, pnl: Number(p.unrealisedPnl || 0), sl: p.stopLoss, tp: p.takeProfit })),
+    pos: POS.map(p => { const s = SETUPS.find(x => x.symbol === p.symbol) || {}; return ({ symbol: p.symbol, side: p.side, size: p.size, entry: p.avgPrice, mark: p.markPrice, pnl: Number(p.unrealisedPnl || 0), sl: p.stopLoss, tp: p.takeProfit, chaseN: s.chaseN || 0, maxGain: s.maxGain || 0, be: !!s.beDone }); }),
     trades: JOURNAL.filter(j => !j.noTrade).slice(-200).map(j => ({ pnl: Number(j.pnl || 0), at: j.closedAt })),
     err: document.getElementById("note-err") ? document.getElementById("note-err").textContent : ""
   })`) || "{}");
@@ -176,12 +176,13 @@ table{width:100%;border-collapse:collapse;font-size:13px}td,th{padding:6px 4px;b
 <div class="mute" id="status2" style="margin-top:4px"></div>
 <div style="margin-top:14px"><button class="big go" id="main">▶ Запустити</button></div>
 <div style="margin-top:10px"><button class="big sc" id="scalp">⚡ Скальпінг</button></div>
+<div id="chaseLine" style="font-size:13px;margin-top:10px"></div>
 <div class="mute" id="scalpHint" style="font-size:12px;margin-top:6px">Скальпінг: короткі угоди, тейк +0.5%, стоп −1% від входу, скан щохвилини.</div>
 <div id="warn"></div></div>
 <div class="card row">
 <div class="k"><span>Капітал, USDT</span><b id="eq">—</b></div><div class="k"><span>Вільно</span><b id="av">—</b></div>
 <div class="k"><span>Сьогодні угод / PnL</span><b id="td">—</b></div><div class="k"><span>Усього угод · win</span><b id="all">—</b></div></div>
-<div class="card"><b>Позиції</b><div class="scroll"><table><thead><tr><th>Монета</th><th>Бік</th><th>Вхід</th><th>Ціна</th><th>PnL</th><th>Стоп / Тейк</th></tr></thead><tbody id="pos"></tbody></table></div></div>
+<div class="card"><b>Позиції</b><div class="scroll"><table><thead><tr><th>Монета</th><th>Бік</th><th>Вхід</th><th>Ціна</th><th>PnL</th><th>Стоп / Тейк</th><th>Імпульс</th></tr></thead><tbody id="pos"></tbody></table></div></div>
 <div class="card"><b>Заявки бота на біржі</b><div class="scroll"><table><thead><tr><th>Монета</th><th>Стан</th><th>Buy Stop</th><th>Sell Stop</th></tr></thead><tbody id="set"></tbody></table></div></div>
 <div class="card"><b>Що робить бот</b><div class="log" id="log"></div></div>
 <div class="mute" style="font-size:12px;margin:14px 0" id="foot"></div>
@@ -195,11 +196,12 @@ $("status2").textContent=on?("Наступний скан через "+S.nextSca
 const m=$("main");m.textContent=on?"■ Зупинити":"▶ Запустити";m.className="big "+(on?"stop":"go");m.disabled=busy;
 const sc=$("scalp");sc.className="big sc"+(S.scalp?" on":"");sc.textContent=S.scalp?"⚡ Скальпінг увімкнено · +"+S.tp+"% / −"+S.sl+"%":"⚡ Скальпінг";sc.disabled=busy;
 const w=[];if(!S.keys)w.push("Немає ключів Bybit: Railway → Variables → BYBIT_API_KEY, BYBIT_API_SECRET");if(S.net.ok===false)w.push(S.net.text);if(S.acc.error&&S.net.ok!==false)w.push("Bybit: "+S.acc.error);if(S.err)w.push(S.err);
+$("chaseLine").innerHTML=S.chase?'<span class="up">🚀 Трейлінг стопа і тейку увімкнено</span> <span class="mute">— після '+Math.round(S.chaseAt*100)+"% шляху до тейку стоп іде за ціною, а тейк відсувається далі в бік руху, щоб забрати весь імпульс</span>":'<span class="mute">Трейлінг стопа і тейку вимкнено</span>';
 $("warn").innerHTML=w.map(x=>'<div class="note warn">'+esc(x)+"</div>").join("");
 $("eq").textContent=f(S.acc.equity);$("av").textContent=f(S.acc.available);
 $("td").innerHTML=S.stats.today+' / <span class="'+(S.stats.todayPnl>=0?"up":"down")+'">'+(S.stats.todayPnl>=0?"+":"")+f(S.stats.todayPnl,3)+"</span>";
 $("all").textContent=S.stats.all+(S.stats.win!=null?" · "+S.stats.win+"%":"");
-$("pos").innerHTML=S.pos.length?S.pos.map(p=>"<tr><td><b>"+esc(p.symbol)+'</b></td><td class="'+(p.side==="Buy"?"up":"down")+'">'+(p.side==="Buy"?"LONG":"SHORT")+"</td><td>"+esc(p.entry)+"</td><td>"+esc(p.mark)+'</td><td class="'+(p.pnl>=0?"up":"down")+'">'+(p.pnl>=0?"+":"")+f(p.pnl,4)+"</td><td>"+esc(p.sl||"—")+" / "+esc(p.tp||"—")+"</td></tr>").join(""):'<tr><td colspan="6" class="mute">Позицій немає</td></tr>';
+$("pos").innerHTML=S.pos.length?S.pos.map(p=>"<tr><td><b>"+esc(p.symbol)+'</b></td><td class="'+(p.side==="Buy"?"up":"down")+'">'+(p.side==="Buy"?"LONG":"SHORT")+"</td><td>"+esc(p.entry)+"</td><td>"+esc(p.mark)+'</td><td class="'+(p.pnl>=0?"up":"down")+'">'+(p.pnl>=0?"+":"")+f(p.pnl,4)+"</td><td>"+esc(p.sl||"—")+" / "+esc(p.tp||"—")+"</td><td>"+(p.chaseN?'<span class="up">🚀 веде: стоп і тейк підтягнуто '+p.chaseN+"×, макс +"+f(p.maxGain,2)+"%</span>":(S.chase?'<span class="mute">чекає '+Math.round(S.chaseAt*100)+"% шляху до тейку</span>":'<span class="mute">вимкнено</span>'))+"</td></tr>").join(""):'<tr><td colspan="7" class="mute">Позицій немає</td></tr>';
 $("set").innerHTML=S.setups.length?S.setups.map(s=>"<tr><td><b>"+esc(s.symbol)+"</b></td><td>"+(s.state==="armed"?"чекає пробою":s.state==="long"?'<span class="up">LONG</span>':'<span class="down">SHORT</span>')+"</td><td>"+esc(s.buy||"—")+"</td><td>"+esc(s.sell||"—")+"</td></tr>").join(""):'<tr><td colspan="4" class="mute">Заявок немає</td></tr>';
 $("log").innerHTML=S.logs.length?S.logs.map(l=>"<div>"+esc(l)+"</div>").join(""):'<div>Поки тихо</div>';
 $("foot").textContent=S.env+" · "+S.net.text+" · останній запит до Bybit "+(S.lastBybitSec>=0?S.lastBybitSec+" с тому":"—")+" · сервер працює "+S.upMin+" хв";}
