@@ -164,6 +164,23 @@ details summary { cursor: pointer; color: var(--mute); font-size: 12px; }
   </section>
 
   <section class="card">
+    <div class="bar"><h2>Усі ордери на біржі</h2><span class="sub" id="ex-info">—</span></div>
+    <p class="sub">Усе, що зараз стоїть на Bybit (USDT-perp): лімітки, стоп-ордери, а також ордери, поставлені вручну чи іншими ботами. Оновлюється кожні 15 с, навіть коли бот зупинений.</p>
+    <div class="scroll"><table>
+      <thead><tr><th>Монета</th><th>Бік</th><th>Тип</th><th>Ціна / тригер</th><th>К-сть</th><th>Reduce</th><th>Чий</th><th>Поставлено</th></tr></thead>
+      <tbody id="ex-orders"></tbody>
+    </table></div>
+  </section>
+
+  <section class="card">
+    <h2>Перенесення між браузером і сервером</h2>
+    <p class="sub">Сетапи, журнал і налаштування зберігаються там, де бот запущено. Щоб сервер (Railway) супроводжував сетапи, поставлені з браузера (Netlify чи файл):
+      1) на старій сторінці натисніть «Експорт» і скопіюйте текст; 2) закрийте стару сторінку — НЕ натискайте там «Зупинити», бо це зніме ордери; 3) тут вставте текст і натисніть «Імпорт». Ключі не переносяться.</p>
+    <div class="row" style="margin-top:8px"><button id="btn-export">Експорт</button><button id="btn-import" class="green">Імпорт</button><span class="sub" id="xfer-out"></span></div>
+    <textarea id="xfer" rows="4" style="width:100%;margin-top:8px;font:12px monospace" placeholder="Сюди вставте текст експорту" spellcheck="false"></textarea>
+  </section>
+
+  <section class="card">
     <div class="bar"><h2>Статистика угод</h2><div class="row"><button id="btn-csv">CSV</button><button id="btn-clear-j">Очистити журнал</button></div></div>
     <div class="kpis" id="kpis"></div>
     <div class="scroll" style="margin-top:10px"><table>
@@ -1306,6 +1323,85 @@ function loadKeys() {
   $("k-env").value = (k && k.env) || LS.get("env", "mainnet");
 }
 
+// ------------------------------------------------------------------ exchange view (independent of RUN)
+let EXORD = [], exAt = 0, exBusy = false;
+async function refreshExchange(force) {
+  if (exBusy || (!force && Date.now() - exAt < 15000)) return;
+  if (!$("k-key").value.trim() || !$("k-secret").value.trim()) { $("ex-info").textContent = "впишіть ключі"; return; }
+  exBusy = true;
+  try {
+    const all = [];
+    for (const filter of ["Order", "StopOrder"]) {
+      let cursor = "";
+      for (let i = 0; i < 6; i++) {
+        const q = { category: "linear", settleCoin: "USDT", orderFilter: filter, limit: "50" };
+        if (cursor) q.cursor = cursor;
+        const r = await bx("/v5/order/realtime", { query: q, auth: true });
+        all.push(...(r.list || []));
+        cursor = r.nextPageCursor || "";
+        if (!cursor) break;
+      }
+    }
+    const seen = new Set();
+    EXORD = all.filter(o => !seen.has(o.orderId) && seen.add(o.orderId));
+    if (!RUN) {
+      const posRes = await bx("/v5/position/list", { query: { category: "linear", settleCoin: "USDT", limit: "200" }, auth: true });
+      POS = (posRes.list || []).filter(p => Number(p.size) > 0);
+    }
+    exAt = Date.now();
+    $("ex-info").textContent = `ордерів ${EXORD.length} · позицій ${POS.length} · ${new Date().toLocaleTimeString()}`;
+  } catch (e) { $("ex-info").textContent = "не вдалося: " + e.message; }
+  finally { exBusy = false; renderExchange(); }
+}
+function owner(o) {
+  const id = String(o.orderLinkId || "");
+  const mine = SETUPS.some(s => id && JSON.stringify(s).includes(id));
+  if (mine) return '<span class="up">цей бот</span>';
+  if (/^b[xgn]/.test(id)) return '<span style="color:var(--gold)" title="Ордер proboystrategy, якого немає в сетапах цієї сторінки: імпортуйте сетапи зі старого браузера">proboy, не в сетапах</span>';
+  if (/^g[xwT]/.test(id)) return '<span class="mute">сітковий бот</span>';
+  return '<span class="mute">вручну / інше</span>';
+}
+function renderExchange() {
+  if (!$("ex-orders")) return;
+  const rows = EXORD.slice().sort((a, b) => a.symbol.localeCompare(b.symbol) || Number(b.price || b.triggerPrice) - Number(a.price || a.triggerPrice));
+  $("ex-orders").innerHTML = rows.length ? rows.map(o => `<tr><td><b>${esc(o.symbol)}</b></td><td class="${o.side === "Buy" ? "up" : "down"}">${o.side}</td>
+    <td>${esc(o.stopOrderType && o.stopOrderType !== "UNKNOWN" ? o.stopOrderType : "")} ${esc(o.orderType)}</td>
+    <td>${Number(o.triggerPrice) ? "тригер " + o.triggerPrice + (Number(o.price) ? " → " + o.price : "") : o.price}</td>
+    <td>${o.qty}</td><td>${o.reduceOnly ? "так" : ""}</td><td>${owner(o)}</td><td>${tm(Number(o.createdTime))}</td></tr>`).join("")
+    : `<tr><td colspan="8" class="mute">${exAt ? "Відкритих ордерів немає" : "Завантажую…"}</td></tr>`;
+}
+const XFER_KEYS = ["settings", "setups", "journal", "cool", "radarLog", "radarAuto", "radarPlace", "radarCfg", "mode", "tab"];
+$("btn-export").onclick = async () => {
+  const out = {};
+  for (const k of XFER_KEYS) { const v = LS.get(k, undefined); if (v !== undefined) out[k] = v; }
+  out.running = RUN;
+  const text = JSON.stringify({ proboy: 1, at: Date.now(), data: out });
+  $("xfer").value = text;
+  try { await navigator.clipboard.writeText(text); $("xfer-out").textContent = `Скопійовано (сетапів ${(out.setups || []).length}, угод у журналі ${(out.journal || []).length})`; }
+  catch { $("xfer-out").textContent = "Виділіть текст нижче і скопіюйте"; }
+};
+$("btn-import").onclick = () => {
+  let pack;
+  try { pack = JSON.parse($("xfer").value.trim()); } catch { $("xfer-out").textContent = "Це не текст експорту"; return; }
+  if (!pack || pack.proboy !== 1 || !pack.data) { $("xfer-out").textContent = "Це не текст експорту proboystrategy"; return; }
+  const d = pack.data;
+  // setups: add the ones this page does not have yet (same symbol = already managed here)
+  const add = (d.setups || []).filter(s => !SETUPS.some(x => x.symbol === s.symbol));
+  SETUPS = SETUPS.concat(add); saveSetups();
+  const ids = new Set(JOURNAL.map(j => j.symbol + "|" + j.closedAt));
+  JOURNAL = JOURNAL.concat((d.journal || []).filter(j => !ids.has(j.symbol + "|" + j.closedAt))).sort((a, b) => (a.closedAt || 0) - (b.closedAt || 0));
+  LS.set("journal", JOURNAL);
+  COOL = Object.assign({}, d.cool || {}, COOL); LS.set("cool", COOL);
+  if (d.settings) { CFG = Object.assign(CFG, d.settings); LS.set("settings", CFG); buildSettings(); }
+  for (const k of ["radarLog", "radarAuto", "radarPlace", "radarCfg"]) if (d[k] !== undefined) LS.set(k, d[k]);
+  if (d.radarLog) RADARLOG = d.radarLog;
+  $("xfer").value = "";
+  $("xfer-out").textContent = `Імпортовано: сетапів ${add.length}, угод ${(d.journal || []).length}, налаштування ${d.settings ? "так" : "ні"}.` + (RUN ? "" : " Натисніть «Запустити бота», щоб сервер їх супроводжував.");
+  log(`Імпорт зі старого браузера: сетапів ${add.length}`, "up");
+  render(); refreshExchange(true);
+};
+setInterval(() => refreshExchange(false), 5000);
+
 // ------------------------------------------------------------------ render
 const fx = (v, d = 4) => v == null || v === "" || Number.isNaN(Number(v)) ? "—" : (Number(v) > 0 ? "+" : "") + Number(v).toFixed(d);
 const tm = (t) => t ? new Date(t).toLocaleString([], { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : "—";
@@ -1331,6 +1427,7 @@ function render() {
     try { await cancelAll(s); SETUPS = SETUPS.filter(x => x !== s); COOL[s.symbol] = Date.now() + CFG.cooldownMin * 60e3; saveSetups(); log(`${s.symbol}: сетап знято вручну`, "mute"); render(); }
     catch (e) { log(e.message, "down"); }
   });
+  renderExchange();
   $("positions").innerHTML = POS.length ? POS.map(p => `<tr><td><b>${esc(p.symbol)}</b></td><td class="${p.side === "Buy" ? "up" : "down"}">${p.side === "Buy" ? "LONG" : "SHORT"}</td>
     <td>${p.size}</td><td>${p.avgPrice}</td><td>${p.markPrice}</td><td class="${Number(p.unrealisedPnl) >= 0 ? "up" : "down"}">${fx(p.unrealisedPnl)}</td>
     <td>${p.stopLoss || "—"}</td><td>${p.takeProfit || "—"}</td><td>${Number(p.trailingStop) ? p.trailingStop : "—"}</td><td>${p.liqPrice || "—"}</td></tr>`).join("")

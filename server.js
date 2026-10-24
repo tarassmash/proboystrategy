@@ -251,7 +251,7 @@ http.createServer(async (req, res) => {
     if (url.pathname === "/__act" && req.method === "POST") {
       if (!PASSWORD) return send(200, JSON.stringify({ ok: false, error: "Лише перегляд: задайте UI_PASSWORD" }), "application/json");
       let raw = "";
-      for await (const chunk of req) { raw += chunk; if (raw.length > 1e5) break; }
+      for await (const chunk of req) { raw += chunk; if (raw.length > 8e6) break; }
       const out = await act(JSON.parse(raw || "{}"));
       dumpStorage();
       return send(200, JSON.stringify(out), "application/json; charset=utf-8");
