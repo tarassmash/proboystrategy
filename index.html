@@ -73,6 +73,7 @@ details summary { cursor: pointer; color: var(--mute); font-size: 12px; }
     <div class="row">
       <span class="pill" id="run-pill"><span class="dot"></span><span id="run-text">Зупинено</span></span>
       <button id="btn-mode" title="Перемкнути режим: пробій діапазону ↔ ракети">🚀 Режим ракет: вимк</button>
+      <button id="btn-scalp" title="Скальпінг: тейк +0.5%, стоп −1%, короткі діапазони, частий скан">⚡ Скальпінг: вимк</button>
       <button id="btn-auto" title="Повний автопілот: пробої + ракети, нові заявки кожен скан, сам послаблює фільтри, якщо довго нічого немає">🤖 Автопілот: вимк</button>
       <button class="gold" id="btn-start">Запустити бота</button>
       <button class="red" id="btn-stop">Зупинити і зняти стопи</button>
@@ -262,7 +263,9 @@ const FIELDS = [
   ["maxEr", "Макс. ER (трендовість)", 0.35, 0.05, 1, false, "0 — пила, 1 — пряма лінія"],
   ["buffer", "Буфер пробою, %", 0.15, 0, 5, false, "відступ тригера від межі"],
   ["slip", "Ліміт від тригера, %", 0.15, 0, 5, false, "для стоп-ліміту"],
-  ["slMode", "Стоп-лос", "mid", null, null, null, "mid|edge|atr"],
+  ["slMode", "Стоп-лос", "mid", null, null, null, "mid|edge|atr|pct"],
+  ["slPct", "Стоп-лос, % від входу", 1, 0.1, 20, false, "коли стоп «% від входу»"],
+  ["tpPct", "Тейк, % від входу", 0, 0, 50, false, "0 — тейк у R; >0 — фіксований % (скальпінг)"],
   ["atrK", "ATR × для стопу", 1.5, 0.3, 10, false, "якщо стоп за ATR"],
   ["tpR", "Тейк-профіт, R", 2.5, 0.5, 20, false, "R = відстань до стопу"],
   ["beR", "Беззбиток при, R", 1, 0, 10, false, "0 — вимкнено"],
@@ -277,7 +280,7 @@ const FIELDS = [
 const SELECTS = {
   dipMode: [["rocket", "Лише для ракет"], ["all", "Для всіх пробоїв"], ["off", "Вимкнено"]],
   rocketSides: [["long", "Лише лонг (вгору)"], ["both", "Обидва боки"]],
-  slMode: [["mid", "Середина діапазону"], ["edge", "Протилежна межа"], ["atr", "Від тригера × ATR"]],
+  slMode: [["mid", "Середина діапазону"], ["edge", "Протилежна межа"], ["atr", "Від тригера × ATR"], ["pct", "% від входу"]],
   orderType: [["Limit", "Стоп-ліміт"], ["Market", "Стоп-маркет"]],
   triggerBy: [["LastPrice", "Остання ціна"], ["MarkPrice", "Марк-ціна"]],
 };
@@ -483,9 +486,11 @@ function bracket(a, sp, side, tpR = CFG.tpR) {
   let sl;
   if (CFG.slMode === "mid") sl = a.mid;
   else if (CFG.slMode === "edge") sl = long ? a.lo : a.hi;
+  else if (CFG.slMode === "pct") sl = long ? trig * (1 - CFG.slPct / 100) : trig * (1 + CFG.slPct / 100);
   else sl = long ? trig - CFG.atrK * a.atr : trig + CFG.atrK * a.atr;
   const risk = Math.abs(trig - sl);
-  const tp = long ? trig + tpR * risk : trig - tpR * risk;
+  // fixed % take (scalping) or a multiple of the risk
+  const tp = CFG.tpPct > 0 ? (long ? trig * (1 + CFG.tpPct / 100) : trig * (1 - CFG.tpPct / 100)) : (long ? trig + tpR * risk : trig - tpR * risk);
   return {
     side, trigger: align(trig, sp.tick, long), limit: align(long ? trig * (1 + slip) : trig * (1 - slip), sp.tick, long),
     sl: align(sl, sp.tick, !long), tp: align(tp, sp.tick, long), risk, riskPct: risk / trig * 100,
@@ -1282,7 +1287,7 @@ async function autopilotScan() {
   const before = SETUPS.length;
   try {
     await scan();
-    if (RUN && CFG.maxSetups - SETUPS.length > 0) await scanRocket(true);
+    if (RUN && !CFG.scalp && CFG.maxSetups - SETUPS.length > 0) await scanRocket(true);
   } finally { Object.assign(CFG, base); }
   const added = SETUPS.length - before, free = CFG.maxSetups - SETUPS.length;
   AP.last = Date.now(); AP.added += Math.max(0, added);
@@ -1293,7 +1298,33 @@ async function autopilotScan() {
   }
   LS.set("ap", AP);
 }
+// ------------------------------------------------------------------ presets
+// Scalping: short 5-minute ranges, frequent scans, small fixed take +0.5% and stop -1% from the entry.
+const SCALP = {
+  scalp: true, tf: 5, lookback: 24, minWidth: 0.3, maxWidth: 2, squeeze: 35, maxEr: 0.45,
+  slMode: "pct", slPct: 1, tpPct: 0.5, beR: 0, trailR: 0, expiryH: 1, cooldownMin: 20, scanMin: 1,
+  maxSetups: 6, coins: 80, dipMode: "off", mode: "breakout",
+};
+function applyPreset(name) {
+  if (name === "scalp") {
+    if (!CFG.scalp) LS.set("preScalp", Object.fromEntries(Object.keys(SCALP).map(k => [k, CFG[k]])));
+    Object.assign(CFG, SCALP);
+    log("⚡ Скальпінг: тейк +" + CFG.tpPct + "%, стоп −" + CFG.slPct + "%, діапазони на " + CFG.tf + "-хв свічках, скан щохвилини", "gold-t");
+  } else {
+    const prev = LS.get("preScalp", null);
+    if (prev) Object.assign(CFG, prev); else Object.assign(CFG, { scalp: false, tpPct: 0, slMode: "mid" });
+    CFG.scalp = false;
+    log("Скальпінг вимкнено, повернено попередні налаштування", "mute");
+  }
+  LS.set("settings", CFG); buildSettings(); paintMode(); paintAuto(); lastScan = 0;
+  AP.relax = 0; AP.dry = 0; LS.set("ap", AP);
+  if (RUN) loop();
+}
+window.applyPreset = applyPreset;
+$("btn-scalp").onclick = () => applyPreset(CFG.scalp ? "normal" : "scalp");
 function paintAuto() {
+  const sc = $("btn-scalp");
+  if (sc) { sc.textContent = CFG.scalp ? `⚡ Скальпінг: +${CFG.tpPct}% / −${CFG.slPct}%` : "⚡ Скальпінг: вимк"; sc.className = CFG.scalp ? "gold" : ""; }
   const b = $("btn-auto");
   b.textContent = CFG.autopilot ? "🤖 Автопілот: увімк" : "🤖 Автопілот: вимк";
   b.className = CFG.autopilot ? "green" : "";
