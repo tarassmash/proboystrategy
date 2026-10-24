@@ -277,6 +277,8 @@ const AUTO_OPT = () => !!lsGet("autoOpt", false);
 setInterval(() => { if (AUTO_OPT() && !AI.on && Date.now() - lsGet("optLast", 0) >= 24 * 3600e3) { try { optimizeNow("авто раз на добу"); dumpStorage(); } catch (e) { log("optimize:", e.message); } } }, 10 * 60000);
 
 const SYSTEM_FULL = `You have FULL control of this trading bot. The owner gave you the steering wheel 100%: there is no human in the loop.
+The owner only presses Start/Stop. YOU decide which strategies run: the breakout autopilot ("mode": breakout / scalp / pause) and
+super scalping ("superscalp": on/off, style "flow" or "pressure", coins and all parameters). Use whatever makes money now; you may run both.
 Your only job is to grow the account. Your results are measured every period: "yourTrackRecord" lists your previous decisions and the
 profit/loss the bot made in the period after each of them, and "performance" shows which settings made or lost money. Learn from it:
 repeat what worked, stop what lost money, and say what you learned in "lesson". If your periods keep losing, the owner will switch you off,
@@ -589,6 +591,18 @@ async function act(what) {
       saveAI();
     }
     return "OK";
+  } else if (what === "allon") {
+    if (!HAS_KEYS) return "Немає ключів Bybit (BYBIT_API_KEY / BYBIT_API_SECRET у Variables)";
+    if (!FAL_KEY) return "Для AI потрібен FAL_KEY у Railway → Variables";
+    if (!ev("RUN") || !ev("CFG.autopilot")) { const r = await act("start"); if (r !== "OK" && r !== "Вже працює") return r; }
+    if (!SS.params.on) SS.setOn(true);                      // AI may switch it off or change its style
+    if (!AI.on) { const r = await act("ai"); if (r !== "OK") return r; } else aiTick(true);
+    return "OK";
+  } else if (what === "alloff") {
+    await act("stop");                                        // stops the bot, super scalping and the AI
+    if (SS.params.on) SS.setOn(false);
+    if (AI.on) { AI.on = false; ev("CFG.aiPause = false"); saveAI(); }
+    return "OK";
   } else if (what === "press") {
     if (!HAS_KEYS) return "Немає ключів Bybit";
     if (SS.params.style === "pressure" && SS.params.on) { SS.setStyle("flow"); return "OK"; }
@@ -636,6 +650,7 @@ const PAGE = `<!doctype html><html lang="uk"><head><meta charset="utf-8"><meta n
 .chip{display:inline-block;border:1px solid var(--line);border-radius:6px;padding:1px 6px;margin:2px;font:11px ui-monospace,monospace}
 .pr{background:transparent;border:2px solid #34d399;color:#6ee7b7;min-height:60px;font-size:18px}.pr.on{background:#059669;border-color:#059669;color:#fff}
 .ss{background:transparent;border:2px solid #22d3ee;color:#67e8f9;min-height:60px;font-size:18px}.ss.on{background:#0891b2;border-color:#0891b2;color:#fff}
+body.simple .card:not(.keep){display:none}
 .big:disabled{opacity:.5;cursor:default}.row{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px}
 .k b{display:block;font:600 18px ui-monospace,monospace}.k span{font-size:12px;color:var(--mute)}
 .dot{display:inline-block;width:10px;height:10px;border-radius:50%;background:var(--mute);margin-right:6px}.dot.on{background:var(--up);box-shadow:0 0 10px var(--up)}
@@ -644,6 +659,17 @@ table{width:100%;border-collapse:collapse;font-size:13px}td,th{padding:6px 4px;b
 .note{border-radius:12px;padding:10px 12px;margin-top:12px;font-size:13px}.warn{background:rgba(246,70,93,.1);border:1px solid rgba(246,70,93,.4)}
 </style></head><body><div class="wrap">
 <h1>Proboy Autopilot</h1><div class="mute" id="sub">Бот працює на сервері 24/7 — сторінку можна закрити</div>
+<div class="card keep" id="simple">
+<div style="font-size:20px;font-weight:700"><span class="dot" id="sdot"></span><span id="sstatus">…</span></div>
+<div class="mute" id="sline" style="margin-top:4px;font-size:14px"></div>
+<div style="margin-top:14px"><button class="big go" id="sbtn">▶ Запустити AI</button></div>
+<div class="row" style="margin-top:14px">
+<div class="k"><span>Капітал, USDT</span><b id="seq">—</b></div><div class="k"><span>Сьогодні</span><b id="sday">—</b></div>
+<div class="k"><span>Усього угод · win</span><b id="sall">—</b></div><div class="k"><span>Прибуток усього</span><b id="spnl">—</b></div></div>
+<div id="sthink" style="margin-top:12px;font-size:14px"></div>
+<div id="swarn"></div>
+<div style="margin-top:10px;text-align:right"><a href="#" id="adv" class="mute" style="font-size:12px">⚙ Детально</a></div>
+</div>
 <div class="card"><b>🎙 Скажіть AI, що зробити</b>
 <div style="display:flex;gap:8px;margin-top:8px"><button class="mic" id="mic" title="Натисніть і говоріть">🎙</button>
 <input id="cmd" placeholder="наприклад: увімкни суперскальпінг тільки на BTC і ETH, тейк 0.3" style="flex:1;min-height:48px;border-radius:12px;border:1px solid var(--line);background:var(--bg);color:var(--ink);padding:0 12px;font-size:15px">
@@ -685,7 +711,28 @@ table{width:100%;border-collapse:collapse;font-size:13px}td,th{padding:6px 4px;b
 const $=(i)=>document.getElementById(i);const esc=(s)=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const f=(v,d=2)=>v==null||isNaN(v)?"—":Number(v).toFixed(d);let S=null,busy=false;
 async function load(){try{S=await fetch("/api/state").then(r=>r.json());paint()}catch(e){$("status").textContent="немає зв'язку з сервером"}}
-function paint(){const on=S.run&&S.auto;$("dot").className="dot"+(on?" on":"");
+let SIMPLE=true;try{SIMPLE=localStorage.getItem("adv")!=="1"}catch(e){}
+document.body.classList.toggle("simple",SIMPLE);
+$("adv").onclick=(e)=>{e.preventDefault();SIMPLE=!SIMPLE;try{localStorage.setItem("adv",SIMPLE?"0":"1")}catch(x){}document.body.classList.toggle("simple",SIMPLE);$("adv").textContent=SIMPLE?"⚙ Детально":"✕ Сховати деталі"};
+$("adv").textContent=SIMPLE?"⚙ Детально":"✕ Сховати деталі";
+function paintSimple(){const A=S.ai||{},X=S.ss||{},XP=X.params||{},on=S.run&&S.auto&&A.on;
+$("sdot").className="dot"+(on?" on":"");
+$("sstatus").textContent=on?(A.busy?"AI думає…":"AI торгує"):(S.run||XP.on?"Працює без AI":"Зупинено");
+const parts=[];if(S.run&&S.auto)parts.push(S.aiPause?"пробої: пауза (рішення AI)":(S.scalp?"скальпінг пробоїв":"пробої"));if(XP.on)parts.push(XP.style==="pressure"?"тиск стакану":"суперскальпінг");
+$("sline").textContent=on?("Зараз: "+(parts.join(" + ")||"AI чекає")+" · наступне рішення AI через "+Math.max(1,Math.round((A.next||0)/60))+" хв"):"Натисніть «Запустити» — далі AI сам вибирає стратегії, монети й налаштування і торгує 24/7";
+const b=$("sbtn");b.textContent=on?"■ Зупинити":"▶ Запустити AI";b.className="big "+(on?"stop":"go");b.disabled=busy||!!A.busy&&!on;
+$("seq").textContent=f(S.acc.equity);
+const P=S.perf||{},XS=X.stats||{};const day=(S.stats&&S.stats.todayPnl||0)+(XS.dayPnl||0),tot=(P.pnl||0)+(XS.pnl||0),n=(P.total||0)+(XS.n||0);
+$("sday").innerHTML='<span class="'+(day>=0?"up":"down")+'">'+(day>=0?"+":"")+f(day,3)+"</span>";
+$("spnl").innerHTML='<span class="'+(tot>=0?"up":"down")+'">'+(tot>=0?"+":"")+f(tot,3)+"</span>";
+const wins=(P.total?Math.round((P.win||0)*P.total/100):0)+(XS.n?Math.round((XS.win||0)*XS.n/100):0);
+$("sall").textContent=n?(n+" · "+Math.round(wins/n*100)+"%"):"0";
+const h=(A.history||[])[0];
+$("sthink").innerHTML=h?('<span style="color:#c4b5fd">🧠 '+new Date(h.at).toLocaleTimeString()+":</span> "+esc(h.reason)+(h.lesson?'<br><span class="mute">Урок: '+esc(h.lesson)+"</span>":"")):"";
+const w=[];if(!S.keys)w.push("Немає ключів Bybit: Railway → Variables → BYBIT_API_KEY, BYBIT_API_SECRET");if(!A.key)w.push("Немає FAL_KEY для AI: Railway → Variables");if(S.net&&S.net.ok===false)w.push(S.net.text);if(A.error)w.push("AI: "+A.error);if(X.noMoney)w.push(X.noMoney);
+$("swarn").innerHTML=w.map(x=>'<div class="note warn">'+esc(x)+"</div>").join("");}
+$("sbtn").onclick=()=>{const A=S&&S.ai||{},on=S&&S.run&&S.auto&&A.on;on?act("alloff","Зупинити все? AI вимкнеться, нові угоди не відкриватимуться, заявки, що чекають, буде знято. Відкриті позиції лишаться зі своїми стопами й тейками."):act("allon",S&&S.env==="mainnet"?"Запустити AI на реальному рахунку? Він сам вибиратиме стратегії, монети й налаштування в межах вашої маржі та плеча.":"")};
+function paint(){paintSimple();const on=S.run&&S.auto;$("dot").className="dot"+(on?" on":"");
 $("status").textContent=on?(S.scalp?"Працює · скальпінг":"Працює · автопілот"):(S.run?"Працює (без автопілота)":"Зупинено");
 $("status2").textContent=on?("Наступний скан через "+S.nextScan+" с · заявок/позицій "+S.setups.length+" з "+S.maxSetups+(S.byBalance?" (максимум за балансом)":"")+" · оновлення заявок кожні "+S.refreshMin+" хв · маржа "+S.margin+" USDT × x"+S.lev+(S.relax?" · фільтри послаблено "+S.relax+"/3":"")):"Натисніть «Запустити» — далі бот торгує сам, доки ви не зупините";
 const m=$("main");m.textContent=on?"■ Зупинити":"▶ Запустити";m.className="big "+(on?"stop":"go");m.disabled=busy;
@@ -802,7 +849,7 @@ http.createServer(async (req, res) => {
         return json(200, { text: await applyCommand(b.id) });
       } catch (e) { return json(200, { error: String(e && e.message || e) }); }
     }
-    if (req.method === "POST" && /^\/api\/(start|stop|scalp|ai|optimize|autoopt|ss|ssopt|press)$/.test(url.pathname)) {
+    if (req.method === "POST" && /^\/api\/(start|stop|scalp|ai|optimize|autoopt|ss|ssopt|press|allon|alloff)$/.test(url.pathname)) {
       if (!PASSWORD) return json(200, { text: "Задайте UI_PASSWORD у Railway → Variables, щоб керувати ботом" });
       return json(200, { text: await act(url.pathname.split("/").pop()) });
     }
