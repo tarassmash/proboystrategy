@@ -292,6 +292,8 @@ It enters with LIMIT orders at the best price and takes a short LIMIT take; the 
  "superscalp":{"on":true|false,"symbols":["BTCUSDT",...up to 12 liquid coins],"params":{tpPct,slPct,scoreIn,bandPct,burstX,wallX,spoofSec,icebergX,
    entryWaitSec,holdMaxSec,maxPositions,cooldownSec,dailyLossPct,margin,leverage,ride,useIceberg,useAbsorption,useSpoof}}
 Choose the most liquid, most active coins for it; tpPct must beat maker fees (0.04% round trip).
+Each live coin has "why" (why there is no entry now) and "peakScore10min"; if super scalping is on but makes no trades for a long time,
+lower scoreIn towards the typical peak scores or pick more active coins.
 Add "lesson": one sentence in Ukrainian about what you learned from your track record.
 `;
 const SYSTEM = SYSTEM_FULL + `You are the risk-aware autopilot of a Bybit USDT-perpetual breakout bot. Every few minutes you receive the market state,
@@ -561,7 +563,7 @@ table{width:100%;border-collapse:collapse;font-size:13px}td,th{padding:6px 4px;b
 <span><button class="mini" id="opt">Застосувати найприбутковіші</button> <button class="mini" id="autoopt">Авто раз на добу</button></span></div>
 <div class="mute" id="perfSum" style="font-size:13px;margin-top:6px"></div><div id="perfRows" style="margin-top:6px"></div></div>
 <div class="card" id="ssCard"><b>⚡⚡ Суперскальпінг: стакан і стрічка наживо</b><div class="mute" id="ssSum" style="font-size:13px;margin-top:4px"></div>
-<div class="scroll"><table><thead><tr><th>Монета</th><th>Стакан</th><th>Дельта</th><th>Сплеск</th><th>Сигнали</th><th>Лонг</th><th>Шорт</th></tr></thead><tbody id="ssLive"></tbody></table></div>
+<div class="scroll"><table><thead><tr><th>Монета</th><th>Стакан</th><th>Дельта</th><th>Сплеск</th><th>Сигнали</th><th>Лонг</th><th>Шорт</th><th>Макс 10 хв</th><th>Чому немає входу</th></tr></thead><tbody id="ssLive"></tbody></table></div>
 <div class="scroll" style="margin-top:8px"><table><thead><tr><th>Угода</th><th>Стан</th><th>Вхід</th><th>Тейк</th><th>Стоп</th><th>с</th></tr></thead><tbody id="ssOpen"></tbody></table></div>
 <div class="log" id="ssTrades" style="margin-top:6px"></div></div>
 <div class="card"><b>🧠 Прогрес AI</b><div class="mute" id="progSum" style="font-size:13px;margin-top:4px"></div>
@@ -596,7 +598,7 @@ sb.textContent=XP.on?"⚡⚡ Суперскальпінг увімкнено":"�
 $("ssLine").innerHTML=(XP.on?'<span style="color:#67e8f9">':'<span class="mute">')+"Стакан, стрічка, айсберги, поглинання, спуфінг · вхід і тейк лімітками · тейк "+XP.tpPct+"% · стоп "+XP.slPct+"% · до "+XP.maxPositions+" угод · "+(X.ws?"дані наживо ✓":"підключаюсь до біржі…")+(X.stoppedForDay?' · <b class="down">денний ліміт збитку — пауза до завтра</b>':"")+"</span>"+(X.err?'<br><span class="down">'+esc(X.err)+"</span>":"");
 $("ssSum").innerHTML="Угод "+(XS.n||0)+(XS.win!=null?" · win "+XS.win+"%":"")+" · PnL "+f(XS.pnl,4)+" · за добу "+(XS.day||0)+" угод "+f(XS.dayPnl,4)+(XS.avgHold!=null?" · середня угода "+XS.avgHold+" с":"")+" · монети: "+esc((XP.symbols||[]).join(", "));
 $("ssLive").innerHTML=(X.live||[]).map(l=>{const sg=[l.iceBid?"айсберг↑":"",l.iceAsk?"айсберг↓":"",l.absBull?"поглин.↑":"",l.absBear?"поглин.↓":"",l.spoofBid?"спуф bid":"",l.spoofAsk?"спуф ask":""].filter(Boolean).join(" ");
-return "<tr><td><b>"+esc(l.sym)+'</b></td><td class="'+(l.imb>=0.5?"up":"down")+'">'+l.imb+'</td><td class="'+(l.delta>=0?"up":"down")+'">'+l.delta+"</td><td>×"+l.burst+"</td><td>"+(sg||'<span class="mute">—</span>')+'</td><td class="'+(l.long>=XP.scoreIn?"up":"")+'">'+l.long+'</td><td class="'+(l.short>=XP.scoreIn?"down":"")+'">'+l.short+"</td></tr>"}).join("")||'<tr><td colspan="7" class="mute">Чекаю дані стакану…</td></tr>';
+return "<tr><td><b>"+esc(l.sym)+'</b></td><td class="'+(l.imb>=0.5?"up":"down")+'">'+(l.imb??"—")+'</td><td class="'+(l.delta>=0?"up":"down")+'">'+(l.delta??"—")+"</td><td>"+(l.burst!=null?"×"+l.burst:"—")+"</td><td>"+(sg||'<span class="mute">—</span>')+'</td><td class="'+(l.long>=XP.scoreIn?"up":"")+'">'+(l.long??"—")+'</td><td class="'+(l.short>=XP.scoreIn?"down":"")+'">'+(l.short??"—")+"</td><td>"+(l.peak10!=null?l.peak10:"—")+'</td><td class="mute">'+esc(l.why||"")+"</td></tr>"}).join("")||'<tr><td colspan="9" class="mute">Чекаю дані стакану…</td></tr>';
 $("ssOpen").innerHTML=(X.open||[]).map(o=>"<tr><td><b>"+esc(o.sym)+'</b> <span class="'+(o.side==="Buy"?"up":"down")+'">'+(o.side==="Buy"?"лонг":"шорт")+"</span></td><td>"+(o.state==="entry"?"чекає виконання ліміту":"в угоді"+(o.rides?" · імпульс ×"+o.rides:""))+"</td><td>"+esc(o.entry)+"</td><td>"+esc(o.tp||"—")+"</td><td>"+esc(o.sl||"—")+"</td><td>"+o.sec+"</td></tr>").join("")||'<tr><td colspan="6" class="mute">Відкритих угод суперскальпінгу немає</td></tr>';
 $("ssTrades").innerHTML=(X.trades||[]).map(t=>"<div>"+new Date(t.closedAt).toLocaleTimeString()+" · "+esc(t.sym)+" "+(t.side==="Buy"?"лонг":"шорт")+" · "+esc(t.how)+' · <span class="'+(t.pnl>=0?"up":"down")+'">'+(t.pnl>=0?"+":"")+t.pnl+"</span> · "+t.holdSec+" с</div>").join("");
 $("chaseLine").innerHTML=S.chase?'<span class="up">🚀 Трейлінг стопа і тейку увімкнено</span> <span class="mute">— після '+Math.round(S.chaseAt*100)+"% шляху до тейку стоп іде за ціною, а тейк відсувається далі в бік руху, щоб забрати весь імпульс</span>":'<span class="mute">Трейлінг стопа і тейку вимкнено</span>';

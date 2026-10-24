@@ -12,7 +12,7 @@ const DEFAULTS = {
   margin: 5, leverage: 10,
   tpPct: 0.2,            // take, % from the entry (limit, maker)
   slPct: 0.3,            // stop, % from the entry (on the exchange)
-  scoreIn: 0.6,          // signal strength needed to enter (0..1)
+  scoreIn: 0.5,          // signal strength needed to enter (0..1)
   bandPct: 0.15,         // book depth used for the imbalance, % from mid
   burstX: 2.5,           // tape burst: 5 s volume vs normal
   wallX: 6,              // a wall: level size vs median level
@@ -29,6 +29,7 @@ const DEFAULTS = {
 
 function create({ ev, log, engineLog, lsGet, lsSet, env, testWs }) {
   const P = Object.assign({}, DEFAULTS, lsGet("ss", {}));
+  if (!P.v) { if (P.scoreIn === 0.6 || P.scoreIn === 0.62) P.scoreIn = DEFAULTS.scoreIn; P.v = 2; }   // the first threshold was too strict for the live market
   const ST = { trades: lsGet("ssTrades", []), dayStart: 0, dayPnl: 0, stoppedForDay: false, wsUp: false, lastMsg: 0, err: "" };
   const M = {};           // per symbol market state
   const POSN = {};        // our live entries/positions per symbol
@@ -206,6 +207,16 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs }) {
     delete POSN[p.sym];
   }
 
+  // the breakout bot keeps away from our coins; its waiting orders on them are removed
+  const W_SET = (list) => { try { ev(`window.__ssSyms = ${JSON.stringify(list)}`); } catch (e) { /* ignore */ } };
+  async function freeCoins() {
+    try {
+      const n = await ev(`(async () => { let n = 0; for (const s of SETUPS.filter(x => x.state === "armed" && (window.__ssSyms || []).includes(x.symbol))) {
+        await cancelAll(s); await cancelDip(s); SETUPS = SETUPS.filter(x => x !== s); n++; } if (n) saveSetups(); return n; })()`);
+      if (n) engineLog(`⚡⚡ Суперскальпінг забрав свої монети: знято ${n} заявок пробою на них`, "mute");
+    } catch (e) { /* next time */ }
+  }
+
   // ---------------- the loop: entries every 0.5 s, our orders every 1.5 s ----------------
   let busy = false, lastPoll = 0;
   async function tick() {
@@ -261,9 +272,22 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs }) {
           }
         }
       }
+      // reserve our coins: the breakout bot does not use them while super scalping is on
+      W_SET(P.on ? P.symbols : []);
+      if (P.on && now - (ST.freedAt || 0) > 30000) { ST.freedAt = now; await freeCoins(); }
+      // why there is no entry, per coin (shown on the page and given to the AI)
+      for (const sym of P.symbols) {
+        const s = signals(sym), m = M[sym] || {};
+        const sc = s ? Math.max(s.long, s.short) : 0;
+        m.peak = (m.peak || []).filter(x => now - x[0] < 600000); if (s) m.peak.push([now, sc]);
+        m.why = !P.on ? "вимкнено" : ST.stoppedForDay ? "денний ліміт збитку" : !s ? "збираю стрічку (20 с)" : POSN[sym] ? "в угоді"
+          : (COOL[sym] || 0) > now ? `пауза ${Math.round((COOL[sym] - now) / 1000)} с` : s.spreadTicks > 3 ? `широкий спред ${s.spreadTicks} тік.`
+          : sc < P.scoreIn ? `сигнал ${sc.toFixed(2)} < ${P.scoreIn}` : Object.keys(POSN).length >= P.maxPositions ? "ліміт угод" : "входжу";
+      }
       // new entries
       if (P.on && !ST.stoppedForDay && Object.keys(POSN).length < P.maxPositions) {
-        const busySyms = new Set(JSON.parse(ev(`JSON.stringify(SETUPS.map(s => s.symbol).concat(POS.map(p => p.symbol)))`) || "[]"));
+        const busySyms = new Set(JSON.parse(ev(`JSON.stringify(POS.map(p => p.symbol).concat(SETUPS.filter(s => s.state !== "armed").map(s => s.symbol)))`) || "[]"));
+        for (const sym of P.symbols) if (busySyms.has(sym) && M[sym] && !POSN[sym]) M[sym].why = "позиція основного бота";
         const cands = P.symbols.map(signals).filter(Boolean)
           .filter(s => !POSN[s.sym] && !busySyms.has(s.sym) && (COOL[s.sym] || 0) < now && s.spreadTicks <= 3)
           .map(s => ({ s, side: s.long >= s.short ? "Buy" : "Sell", score: Math.max(s.long, s.short) }))
@@ -338,14 +362,14 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs }) {
   }
   function view() {
     return { params: P, ws: ST.wsUp && Date.now() - ST.lastMsg < 15000, err: ST.err, stoppedForDay: ST.stoppedForDay, stats: stats(),
-      live: P.symbols.map(signals).filter(Boolean), open: Object.values(POSN).map(p => ({ sym: p.sym, side: p.side, state: p.state, entry: p.entry || p.price, tp: p.tp || null, sl: p.sl || null, rides: p.rides || 0, sec: Math.round((Date.now() - (p.openedAt || p.at)) / 1000) })),
+      live: P.symbols.map(sym => Object.assign({ sym }, signals(sym) || {}, { why: (M[sym] || {}).why || "підключаюсь", peak10: +Math.max(0, ...((M[sym] || {}).peak || []).map(x => x[1])).toFixed(2) })), open: Object.values(POSN).map(p => ({ sym: p.sym, side: p.side, state: p.state, entry: p.entry || p.price, tp: p.tp || null, sl: p.sl || null, rides: p.rides || 0, sec: Math.round((Date.now() - (p.openedAt || p.at)) / 1000) })),
       trades: ST.trades.slice(-15).reverse() };
   }
   function aiView() {
     // what the AI needs: parameters, results, live signals and the last trades with the signals they were taken on
     const by = (f) => { const g = {}; for (const t of ST.trades.slice(-300)) { const k = f(t); if (k == null) continue; (g[k] = g[k] || []).push(t); }
       return Object.entries(g).map(([k, a]) => ({ value: k, n: a.length, win: Math.round(a.filter(x => x.pnl > 0).length / a.length * 100), pnl: +a.reduce((s, x) => s + x.pnl, 0).toFixed(4) })); };
-    return { params: P, stats: stats(), live: P.symbols.map(signals).filter(Boolean),
+    return { params: P, stats: stats(), live: P.symbols.map(sym => Object.assign({ sym }, signals(sym) || {}, { why: (M[sym] || {}).why || "", peakScore10min: +Math.max(0, ...((M[sym] || {}).peak || []).map(x => x[1])).toFixed(2) })),
       bySymbol: by(t => t.sym), bySignal: [].concat(by(t => t.sig && t.sig.ice ? "iceberg" : null), by(t => t.sig && t.sig.abs ? "absorption" : null), by(t => t.sig && t.sig.spoof ? "spoof" : null)),
       byTp: by(t => t.cfg && t.cfg.tpPct), last: ST.trades.slice(-20) };
   }

@@ -561,7 +561,7 @@ async function scan() {
   $("scan-info").textContent = `Скан ${new Date().toLocaleTimeString()} · вільних слотів ${Math.max(0, free)}`;
   if (free <= 0) return;
   const tick = await bx("/v5/market/tickers", { query: { category: "linear" } });
-  const busySyms = new Set([...SETUPS.map(s => s.symbol), ...POS.map(p => p.symbol)]);
+  const busySyms = new Set([...SETUPS.map(s => s.symbol), ...POS.map(p => p.symbol), ...(window.__ssSyms || [])]);   // __ssSyms: coins reserved by super scalping
   const list = (tick.list || [])
     .filter(t => t.symbol.endsWith("USDT") && Number(t.turnover24h) >= CFG.minTurnover * 1e6 && Number(t.lastPrice) > 0)
     .sort((a, b) => Number(b.turnover24h) - Number(a.turnover24h))
@@ -634,7 +634,7 @@ async function scanRocket(place) {
     const all = tick.list || [];
     const btc = all.find(t => t.symbol === "BTCUSDT");
     const btc24 = btc ? Number(btc.price24hPcnt) * 100 : 0;
-    const busySyms = new Set([...SETUPS.map(s => s.symbol), ...POS.map(p => p.symbol)]);
+    const busySyms = new Set([...SETUPS.map(s => s.symbol), ...POS.map(p => p.symbol), ...(window.__ssSyms || [])]);   // __ssSyms: coins reserved by super scalping
     const list = all
       .filter(t => t.symbol.endsWith("USDT") && Number(t.turnover24h) >= CFG.rocketTurnover * 1e6 && Number(t.lastPrice) > 0)
       .sort((a, b) => Number(b.turnover24h) - Number(a.turnover24h))
