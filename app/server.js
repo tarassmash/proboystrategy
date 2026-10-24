@@ -117,7 +117,7 @@ setInterval(() => log(`heartbeat: ${ev("RUN") ? "RUNNING" : "stopped"}${ev("CFG.
 function state() {
   const s = JSON.parse(ev(`JSON.stringify({
     run: RUN, auto: !!CFG.autopilot, scalp: !!CFG.scalp, tp: CFG.tpPct, sl: CFG.slPct, margin: CFG.margin, lev: CFG.leverage,
-    scanMin: CFG.scanMin, maxSetups: CFG.maxSetups, relax: AP.relax || 0, added: AP.added || 0,
+    scanMin: CFG.scanMin, maxSetups: AP.slots || CFG.maxSetups, byBalance: CFG.maxMode !== "fixed", refreshMin: CFG.refreshMin, relax: AP.relax || 0, added: AP.added || 0,
     nextScan: RUN ? Math.max(0, Math.round((lastScan + CFG.scanMin * 60e3 - Date.now()) / 1000)) : null,
     setups: SETUPS.map(s => ({ symbol: s.symbol, state: s.state, kind: s.kind, now: !!s.now, buy: s.buy && s.buy.trigger, sell: s.sell && s.sell.trigger, entry: s.entry || null })),
     pos: POS.map(p => ({ symbol: p.symbol, side: p.side, size: p.size, entry: p.avgPrice, mark: p.markPrice, pnl: Number(p.unrealisedPnl || 0), sl: p.stopLoss, tp: p.takeProfit })),
@@ -191,7 +191,7 @@ const f=(v,d=2)=>v==null||isNaN(v)?"—":Number(v).toFixed(d);let S=null,busy=fa
 async function load(){try{S=await fetch("/api/state").then(r=>r.json());paint()}catch(e){$("status").textContent="немає зв'язку з сервером"}}
 function paint(){const on=S.run&&S.auto;$("dot").className="dot"+(on?" on":"");
 $("status").textContent=on?(S.scalp?"Працює · скальпінг":"Працює · автопілот"):(S.run?"Працює (без автопілота)":"Зупинено");
-$("status2").textContent=on?("Наступний скан через "+S.nextScan+" с · заявок/позицій "+S.setups.length+" з "+S.maxSetups+" · маржа "+S.margin+" USDT × x"+S.lev+(S.relax?" · фільтри послаблено "+S.relax+"/3":"")):"Натисніть «Запустити» — далі бот торгує сам, доки ви не зупините";
+$("status2").textContent=on?("Наступний скан через "+S.nextScan+" с · заявок/позицій "+S.setups.length+" з "+S.maxSetups+(S.byBalance?" (максимум за балансом)":"")+" · оновлення заявок кожні "+S.refreshMin+" хв · маржа "+S.margin+" USDT × x"+S.lev+(S.relax?" · фільтри послаблено "+S.relax+"/3":"")):"Натисніть «Запустити» — далі бот торгує сам, доки ви не зупините";
 const m=$("main");m.textContent=on?"■ Зупинити":"▶ Запустити";m.className="big "+(on?"stop":"go");m.disabled=busy;
 const sc=$("scalp");sc.className="big sc"+(S.scalp?" on":"");sc.textContent=S.scalp?"⚡ Скальпінг увімкнено · +"+S.tp+"% / −"+S.sl+"%":"⚡ Скальпінг";sc.disabled=busy;
 const w=[];if(!S.keys)w.push("Немає ключів Bybit: Railway → Variables → BYBIT_API_KEY, BYBIT_API_SECRET");if(S.net.ok===false)w.push(S.net.text);if(S.acc.error&&S.net.ok!==false)w.push("Bybit: "+S.acc.error);if(S.err)w.push(S.err);
