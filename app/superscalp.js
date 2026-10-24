@@ -191,6 +191,15 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs }) {
   const amend = (sym, id, price) => bx("/v5/order/amend", { method: "POST", auth: true, body: { category: "linear", symbol: sym, orderLinkId: id, price: String(price) } });
 
   async function enter(sym, side, sig) {
+    // enough free money for this entry? (a limit entry reserves its margin on Bybit right away)
+    const w = await bx("/v5/account/wallet-balance", { query: { accountType: "UNIFIED" }, auth: true });
+    const free = Number(((w.list || [])[0] || {}).totalAvailableBalance || 0);
+    if (free < P.margin * 1.05) {
+      ST.noMoneyUntil = Date.now() + 60000;
+      ST.noMoney = `вільно ${free.toFixed(2)} USDT, на вхід треба ${(P.margin * 1.05).toFixed(2)}`;
+      return;
+    }
+    ST.noMoney = "";
     const sp = await specOf(sym);
     const lev = Math.min(P.leverage, Math.floor(sp.maxLev));
     const price = side === "Buy" ? sig.bid : sig.ask;                // join the best price: maker
@@ -246,7 +255,7 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs }) {
   }
 
   // the breakout bot keeps away from our coins; its waiting orders on them are removed
-  const W_SET = (list) => { try { ev(`window.__ssSyms = ${JSON.stringify(list)}`); } catch (e) { /* ignore */ } };
+  const W_SET = (list) => { try { ev(`window.__ssSyms = ${JSON.stringify(list)}; window.__ssReserve = ${P.on ? P.maxPositions * P.margin * 1.1 : 0}`); } catch (e) { /* ignore */ } };
   async function freeCoins() {
     try {
       const n = await ev(`(async () => { let n = 0; for (const s of SETUPS.filter(x => x.state === "armed" && (window.__ssSyms || []).includes(x.symbol))) {
@@ -401,10 +410,10 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs }) {
         m.peak = (m.peak || []).filter(x => now - x[0] < 600000); if (s) m.peak.push([now, sc]);
         m.why = !P.on ? "вимкнено" : ST.stoppedForDay ? "денний ліміт збитку" : !s ? "збираю стрічку (20 с)" : POSN[sym] ? "в угоді"
           : (COOL[sym] || 0) > now ? `пауза ${Math.round((COOL[sym] - now) / 1000)} с` : s.spreadTicks > 3 ? `широкий спред ${s.spreadTicks} тік.`
-          : sc < P.scoreIn ? `сигнал ${sc.toFixed(2)} < ${P.scoreIn}` : Object.keys(POSN).length >= P.maxPositions ? "ліміт угод" : "входжу";
+          : (ST.noMoneyUntil || 0) > now ? "мало вільних коштів" : sc < P.scoreIn ? `сигнал ${sc.toFixed(2)} < ${P.scoreIn}` : Object.keys(POSN).length >= P.maxPositions ? "ліміт угод" : "входжу";
       }
       // new entries
-      if (P.on && !ST.stoppedForDay && Object.keys(POSN).length < P.maxPositions) {
+      if (P.on && !ST.stoppedForDay && (ST.noMoneyUntil || 0) < now && Object.keys(POSN).length < P.maxPositions) {
         const busySyms = new Set(JSON.parse(ev(`JSON.stringify(POS.map(p => p.symbol).concat(SETUPS.filter(s => s.state !== "armed").map(s => s.symbol)))`) || "[]"));
         for (const sym of P.symbols) if (busySyms.has(sym) && M[sym] && !POSN[sym]) M[sym].why = "позиція основного бота";
         const cands = P.symbols.map(signals).filter(Boolean)
@@ -415,7 +424,15 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs }) {
           .sort((a, b) => b.score - a.score);
         for (const c of cands) {
           if (Object.keys(POSN).length >= P.maxPositions) break;
-          try { await enter(c.s.sym, c.side, c.s); } catch (e) { ST.err = `${c.s.sym}: ${e.message}`; COOL[c.s.sym] = now + 30000; }
+          try { await enter(c.s.sym, c.side, c.s); }
+          catch (e) {
+            if (/110007|ab not enough|insufficient|not enough/i.test(e.message)) {
+              ST.noMoneyUntil = now + 60000; ST.noMoney = "Bybit: недостатньо вільних коштів (маржу зайняли інші ордери/позиції)";
+              break;
+            }
+            ST.err = `${c.s.sym}: ${e.message}`; COOL[c.s.sym] = now + 30000;
+          }
+          if ((ST.noMoneyUntil || 0) > Date.now()) break;
         }
       }
     } catch (e) { ST.err = String(e && e.message || e); }
@@ -482,7 +499,7 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs }) {
       day: day.length, dayPnl: +day.reduce((a, x) => a + x.pnl, 0).toFixed(4), avgHold: t.length ? Math.round(t.reduce((a, x) => a + x.holdSec, 0) / t.length) : null };
   }
   function view() {
-    return { vol: ST.vol, pickedAt: ST.pickedAt || 0, params: P, ws: ST.wsUp && Date.now() - ST.lastMsg < 15000, err: ST.err, stoppedForDay: ST.stoppedForDay, stats: stats(),
+    return { noMoney: (ST.noMoneyUntil || 0) > Date.now() ? ST.noMoney : "", vol: ST.vol, pickedAt: ST.pickedAt || 0, params: P, ws: ST.wsUp && Date.now() - ST.lastMsg < 15000, err: ST.err, stoppedForDay: ST.stoppedForDay, stats: stats(),
       live: P.symbols.map(sym => Object.assign({ sym }, signals(sym) || {}, { why: (M[sym] || {}).why || "підключаюсь", peak10: +Math.max(0, ...((M[sym] || {}).peak || []).map(x => x[1])).toFixed(2) })), open: Object.values(POSN).map(p => ({ sym: p.sym, side: p.side, state: p.state, entry: p.entry || p.price, tp: p.tp || null, sl: p.sl || null, rides: p.rides || 0, sec: Math.round((Date.now() - (p.openedAt || p.at)) / 1000) })),
       trades: ST.trades.slice(-15).reverse() };
   }
