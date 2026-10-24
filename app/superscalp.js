@@ -35,13 +35,15 @@ const DEFAULTS = {
   // coins: the most volatile liquid coins, re-picked every few minutes
   autoCoins: true,
   coinCount: 6,
-  minTurnoverM: 50,      // 24 h turnover, million $ (thin coins have wide spreads and fake moves)
+  minTurnoverM: 200,     // 24 h turnover, million $: order-book scalping needs a deep book (thin coins have fake walls and jumps)
   pickEveryMin: 10,
 };
 
 function create({ ev, log, engineLog, lsGet, lsSet, env, testWs }) {
+  let ST_PICK_NOW = false;
   const P = Object.assign({}, DEFAULTS, lsGet("ss", {}));
   if (!P.v) { if (P.scoreIn === 0.6 || P.scoreIn === 0.62) P.scoreIn = DEFAULTS.scoreIn; P.v = 2; }   // the first threshold was too strict for the live market
+  if (P.v < 3) { if (!P.minTurnoverM || P.minTurnoverM < DEFAULTS.minTurnoverM) P.minTurnoverM = DEFAULTS.minTurnoverM; P.v = 3; ST_PICK_NOW = true; }
   const ST = { hedge: !!lsGet("ssHedge", false), trades: lsGet("ssTrades", []), dayStart: 0, dayPnl: 0, stoppedForDay: false, wsUp: false, lastMsg: 0, err: "" };
   const M = {};           // per symbol market state
   const POSN = {};        // our live entries/positions per symbol
@@ -302,7 +304,7 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs }) {
       }
     } catch (e) { ST.err = "вибір монет: " + (e && e.message || e); log("pickCoins:", e && (e.stack || e.message || e)); }
   }
-  setInterval(() => { if (P.on) pickCoins(false); }, 30000);
+  setInterval(() => { if (P.on) { pickCoins(ST_PICK_NOW); ST_PICK_NOW = false; } }, 30000);
 
   // drop what loses: a coin with a losing recent run pauses for an hour; a signal type that keeps losing is switched off
   function prune(sym) {
