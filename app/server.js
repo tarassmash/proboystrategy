@@ -305,6 +305,8 @@ Use "byExit", "bySignal", "bySymbol" and "byTp" to see what loses money and fix 
 Choose the most liquid, most active coins for it; tpPct must beat maker fees (0.04% round trip).
 Each live coin has "why" (why there is no entry now) and "peakScore10min"; if super scalping is on but makes no trades for a long time,
 lower scoreIn towards the typical peak scores or pick more active coins.
+Main switch "inverse": "off" | "on" | "auto" - everything the other way round for all strategies (see "everythingReversed").
+In auto the bot flips by itself after a losing series; set it yourself only with a clear reason from the results.
 Add "lesson": one sentence in Ukrainian about what you learned from your track record.
 `;
 const SYSTEM = SYSTEM_FULL + `You are the risk-aware autopilot of a Bybit USDT-perpetual breakout bot. Every few minutes you receive the market state,
@@ -362,6 +364,7 @@ Available actions (use only what the owner asked for):
  "close": ["SYMBOL"]  "cancel": ["SYMBOL"]  "open": [{"symbol":"SOLUSDT","side":"Buy|Sell"}]
  "remember": "a standing instruction for the AI autopilot, in Ukrainian" (only for rules about the future, e.g. "be more careful", "trade only BTC")
  "forget": true  (clear all remembered standing instructions)
+ "inverse": "off" | "on" | "auto"   (main switch: everything the other way round, Buy <-> Sell)
 Answer with ONE JSON object: {"actions":{...}, "summary":"what will be done, in Ukrainian, short list", "question":"ask only if the instruction is unclear, else empty"}`;
 const PLANS = new Map();
 async function command(text) {
@@ -409,6 +412,7 @@ async function applyCommand(id) {
   if (typeof a.ai === "boolean" && a.ai !== AI.on) done.push("AI: " + await act("ai"));
   if (a.optimize === "breakout" || a.optimize === "both") done.push(optimizeNow("голосом"));
   if (a.optimize === "superscalp" || a.optimize === "both") done.push(await act("ssopt"));
+  if (["off", "on", "auto"].includes(a.inverse)) { setInverse(a.inverse); done.push(`усе навпаки: ${a.inverse}`); }
   if (a.forget) { lsSet("aiNotes", []); done.push("постійні вказівки AI очищено"); }
   if (a.remember) { const n = NOTES(); n.push({ at: Date.now(), text: String(a.remember).slice(0, 300) }); lsSet("aiNotes", n.slice(-20)); done.push(`AI запам'ятав: «${String(a.remember).slice(0, 120)}»`); }
   dumpStorage();
@@ -464,6 +468,7 @@ async function applyDecision(d) {
       changes.push(`закрито ${p.symbol}`);
     } catch (e) { changes.push(`не закрив ${p.symbol}: ${e.message}`); }
   }
+  if (["off", "on", "auto"].includes(d.inverse) && d.inverse !== GINV.mode) { setInverse(d.inverse); changes.push(`усе навпаки: ${d.inverse}`); }
   // super scalping: on/off, coins and every parameter (margin and leverage capped like everything else)
   if (d.superscalp && typeof d.superscalp === "object") {
     const ssc = SS.setParams(Object.assign({}, d.superscalp.params || {}, Array.isArray(d.superscalp.symbols) ? { symbols: d.superscalp.symbols } : {}),
@@ -483,7 +488,9 @@ async function applyDecision(d) {
   // trades the AI opens itself (stop and take are set by the bot)
   if (!ev("CFG.aiPause")) {
     for (const o of (Array.isArray(d.open) ? d.open : []).slice(0, 3)) {
-      const sym = String(o && o.symbol || "").toUpperCase(), side = o && /sell|short/i.test(o.side) ? "Sell" : "Buy";
+      const sym = String(o && o.symbol || "").toUpperCase();
+      let side = o && /sell|short/i.test(o.side) ? "Sell" : "Buy";
+      if (GINV.inv) side = side === "Buy" ? "Sell" : "Buy";        // everything the other way round
       if (!/^[A-Z0-9]{2,30}USDT$/.test(sym)) continue;
       try {
         await ev(`enterNow(${JSON.stringify(sym)}, ${JSON.stringify(side)}, { score: null, reasons: [${JSON.stringify("AI: " + String(o.why || "").slice(0, 120))}] }, { kind: "ai" })`);
@@ -517,6 +524,7 @@ async function aiTick(force) {
       performance: perf(),
       account: { equity: ACC.equity, available: ACC.available },
       superscalp: SS.aiView(),
+      everythingReversed: { mode: GINV.mode, active: GINV.inv, note: "when active, every trade is the mirror: Buy signals open Sell and vice versa, take and stop swapped" },
       yourTrackRecord: AI.history.slice(-12).map(h => ({ at: new Date(h.at).toISOString(), mode: h.mode, regime: h.regime, changes: h.changes, lesson: h.lesson || "",
         periodPnlUsdt: h.periodPnl ?? null, periodTrades: h.periodTrades ?? null, periodWins: h.periodWins ?? null, equityAtDecision: h.equity ?? null })),
     });
@@ -535,6 +543,52 @@ setInterval(() => aiTick(false), 30000);
 
 // ---------------- super scalping by order flow ----------------
 const SS = require("./superscalp").create({ ev, log, engineLog, lsGet, lsSet, env: ENV, testWs: (process.env.TEST_WS_URL || "").trim() });
+
+// ---------------- the main switch: everything the other way round ----------------
+// mode "off" | "on" | "auto". In auto: the last INV_N closed trades of all strategies in the current direction lose
+// (PnL < 0 and at least 60% losers) -> flip everything. If the other direction also lost recently -> stay, re-check later.
+const INV_N = Math.max(8, Number(process.env.INVERT_TRADES || 15));
+const GINV = Object.assign({ mode: "auto", inv: false, since: Date.now(), judged: {} }, lsGet("ginv", {}));
+const saveG = () => lsSet("ginv", GINV);
+function applyInverse(reason) {
+  try { ev(`CFG.inverse = ${!!GINV.inv}; LS.set("settings", CFG)`); } catch (e) { /* engine not ready */ }
+  SS.setParams({ invert: GINV.inv ? "on" : "off" });
+  saveG(); dumpStorage();
+  if (reason) engineLog(`🔄 ${GINV.inv ? "УСЕ НАВПАКИ: Buy → Sell, Sell → Buy, тейк і стоп поміняні" : "Звичайний напрямок угод"} — ${reason}`, GINV.inv ? "gold-t" : "up");
+}
+function allTrades(since) {
+  const eng = JSON.parse(ev(`JSON.stringify(JOURNAL.filter(j => !j.noTrade && j.closedAt >= ${since}).map(j => ({ pnl: Number(j.pnl || 0), at: j.closedAt })))`) || "[]");
+  const ss = (SS.view().trades || []).length ? JSON.parse(JSON.stringify(lsGet("ssTrades", []))).filter(t => t.closedAt >= since).map(t => ({ pnl: t.pnl, at: t.closedAt })) : [];
+  return eng.concat(ss).sort((a, b) => a.at - b.at);
+}
+function judgeInverse() {
+  if (GINV.mode !== "auto") return;
+  const ts = allTrades(GINV.since);
+  if (ts.length < INV_N) return;
+  const last = ts.slice(-INV_N), pnl = last.reduce((a, t) => a + t.pnl, 0), losers = last.filter(t => t.pnl < 0).length;
+  if (!(pnl < 0 && losers / last.length >= 0.6)) return;
+  const cur = GINV.inv ? "inverted" : "normal", other = GINV.inv ? "normal" : "inverted";
+  GINV.judged[cur] = { at: Date.now(), pnl: +pnl.toFixed(4), losers };
+  const o = GINV.judged[other];
+  if (o && Date.now() - o.at < 24 * 3600e3) {
+    // both directions lost in the last day: flipping again would only add fees; keep and re-check on fresh trades
+    GINV.since = Date.now(); saveG();
+    engineLog(`🔄 Обидва напрямки в мінусі за добу (зараз ${losers}/${INV_N} збиткових, ${pnl.toFixed(3)} USDT) — не перевертаю, перевірю на нових угодах`, "down");
+    return;
+  }
+  GINV.inv = !GINV.inv; GINV.since = Date.now();
+  applyInverse(`серія в мінусі: ${losers} з ${INV_N} угод збиткові, разом ${pnl.toFixed(3)} USDT`);
+}
+setTimeout(() => applyInverse(""), 3000);
+setInterval(judgeInverse, 60000);
+function setInverse(mode) {
+  if (!["off", "on", "auto"].includes(mode)) return "Невідомий режим";
+  GINV.mode = mode;
+  if (mode !== "auto") GINV.inv = mode === "on";
+  GINV.since = Date.now(); GINV.judged = {};
+  applyInverse(mode === "auto" ? "авто: перевертаю сам, якщо серія в мінусі" : mode === "on" ? "увімкнено вручну" : "вимкнено вручну");
+  return "OK";
+}
 
 function state() {
   const s = JSON.parse(ev(`JSON.stringify({
@@ -556,6 +610,7 @@ function state() {
       next: AI.on ? Math.max(0, Math.round((AI.last + AI_EVERY * 60000 - Date.now()) / 1000)) : null, history: AI.history.slice(-5).reverse() },
     aiPause: !!ev("CFG.aiPause"),
     perf: perf(), autoOpt: AUTO_OPT(), progress: progress(), ss: SS.view(), notes: NOTES(),
+    inverse: { mode: GINV.mode, inv: GINV.inv, n: INV_N, recent: (() => { const t = allTrades(GINV.since); return { n: t.length, pnl: +t.reduce((a, x) => a + x.pnl, 0).toFixed(4) }; })() },
     lastBybitSec: ACT.last ? Math.round((Date.now() - ACT.last) / 1000) : -1, upMin: Math.round((Date.now() - ACT.started) / 60000),
     stats: {
       all: tr.length, pnl: tr.reduce((a, t) => a + t.pnl, 0), win: tr.length ? Math.round(tr.filter(t => t.pnl > 0).length / tr.length * 100) : null,
@@ -591,6 +646,8 @@ async function act(what) {
       saveAI();
     }
     return "OK";
+  } else if (what === "inv-off" || what === "inv-on" || what === "inv-auto") {
+    return setInverse(what.slice(4));
   } else if (what === "allon") {
     if (!HAS_KEYS) return "Немає ключів Bybit (BYBIT_API_KEY / BYBIT_API_SECRET у Variables)";
     if (!FAL_KEY) return "Для AI потрібен FAL_KEY у Railway → Variables";
@@ -651,6 +708,8 @@ const PAGE = `<!doctype html><html lang="uk"><head><meta charset="utf-8"><meta n
 .pr{background:transparent;border:2px solid #34d399;color:#6ee7b7;min-height:60px;font-size:18px}.pr.on{background:#059669;border-color:#059669;color:#fff}
 .ss{background:transparent;border:2px solid #22d3ee;color:#67e8f9;min-height:60px;font-size:18px}.ss.on{background:#0891b2;border-color:#0891b2;color:#fff}
 body.simple .card:not(.keep){display:none}
+.seg{display:grid;grid-template-columns:1fr 1fr 1fr;border:1px solid var(--line);border-radius:12px;overflow:hidden}.seg button{min-height:44px;border:0;background:var(--bg);color:var(--mute);font-size:15px;cursor:pointer}
+.seg button.on{background:#f59e0b;color:#111;font-weight:700}
 .big:disabled{opacity:.5;cursor:default}.row{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px}
 .k b{display:block;font:600 18px ui-monospace,monospace}.k span{font-size:12px;color:var(--mute)}
 .dot{display:inline-block;width:10px;height:10px;border-radius:50%;background:var(--mute);margin-right:6px}.dot.on{background:var(--up);box-shadow:0 0 10px var(--up)}
@@ -663,6 +722,9 @@ table{width:100%;border-collapse:collapse;font-size:13px}td,th{padding:6px 4px;b
 <div style="font-size:20px;font-weight:700"><span class="dot" id="sdot"></span><span id="sstatus">…</span></div>
 <div class="mute" id="sline" style="margin-top:4px;font-size:14px"></div>
 <div style="margin-top:14px"><button class="big go" id="sbtn">▶ Запустити AI</button></div>
+<div style="margin-top:12px"><div style="font-size:14px;font-weight:600">🔄 Усе навпаки (Buy ↔ Sell)</div>
+<div class="seg" style="margin-top:6px"><button data-inv="off">Вимк</button><button data-inv="auto">Авто</button><button data-inv="on">Увімк</button></div>
+<div class="mute" id="invline" style="font-size:12px;margin-top:4px"></div></div>
 <div class="row" style="margin-top:14px">
 <div class="k"><span>Капітал, USDT</span><b id="seq">—</b></div><div class="k"><span>Сьогодні</span><b id="sday">—</b></div>
 <div class="k"><span>Усього угод · win</span><b id="sall">—</b></div><div class="k"><span>Прибуток усього</span><b id="spnl">—</b></div></div>
@@ -730,7 +792,10 @@ $("sall").textContent=n?(n+" · "+Math.round(wins/n*100)+"%"):"0";
 const h=(A.history||[])[0];
 $("sthink").innerHTML=h?('<span style="color:#c4b5fd">🧠 '+new Date(h.at).toLocaleTimeString()+":</span> "+esc(h.reason)+(h.lesson?'<br><span class="mute">Урок: '+esc(h.lesson)+"</span>":"")):"";
 const w=[];if(!S.keys)w.push("Немає ключів Bybit: Railway → Variables → BYBIT_API_KEY, BYBIT_API_SECRET");if(!A.key)w.push("Немає FAL_KEY для AI: Railway → Variables");if(S.net&&S.net.ok===false)w.push(S.net.text);if(A.error)w.push("AI: "+A.error);if(X.noMoney)w.push(X.noMoney);
+const IV=S.inverse||{};document.querySelectorAll("[data-inv]").forEach(b=>b.classList.toggle("on",b.dataset.inv===IV.mode));
+$("invline").innerHTML=(IV.inv?'<b style="color:#f59e0b">Зараз усе навпаки: сигнал Buy → Sell, Sell → Buy</b>':"Зараз звичайний напрямок")+(IV.mode==="auto"?" · авто: перевертає сам, якщо "+Math.ceil(IV.n*0.6)+"+ з "+IV.n+" останніх угод у мінусі"+(IV.recent?" (після останнього перемикання: "+IV.recent.n+" уг., "+(IV.recent.pnl>=0?"+":"")+f(IV.recent.pnl,3)+")":""):"");
 $("swarn").innerHTML=w.map(x=>'<div class="note warn">'+esc(x)+"</div>").join("");}
+document.querySelectorAll("[data-inv]").forEach(b=>b.onclick=()=>act("inv-"+b.dataset.inv,b.dataset.inv==="on"?"Увімкнути «усе навпаки»? Кожен сигнал Buy відкриватиме Sell і навпаки, тейк і стоп поміняються місцями.":""));
 $("sbtn").onclick=()=>{const A=S&&S.ai||{},on=S&&S.run&&S.auto&&A.on;on?act("alloff","Зупинити все? AI вимкнеться, нові угоди не відкриватимуться, заявки, що чекають, буде знято. Відкриті позиції лишаться зі своїми стопами й тейками."):act("allon",S&&S.env==="mainnet"?"Запустити AI на реальному рахунку? Він сам вибиратиме стратегії, монети й налаштування в межах вашої маржі та плеча.":"")};
 function paint(){paintSimple();const on=S.run&&S.auto;$("dot").className="dot"+(on?" on":"");
 $("status").textContent=on?(S.scalp?"Працює · скальпінг":"Працює · автопілот"):(S.run?"Працює (без автопілота)":"Зупинено");
@@ -849,7 +914,7 @@ http.createServer(async (req, res) => {
         return json(200, { text: await applyCommand(b.id) });
       } catch (e) { return json(200, { error: String(e && e.message || e) }); }
     }
-    if (req.method === "POST" && /^\/api\/(start|stop|scalp|ai|optimize|autoopt|ss|ssopt|press|allon|alloff)$/.test(url.pathname)) {
+    if (req.method === "POST" && /^\/api\/(start|stop|scalp|ai|optimize|autoopt|ss|ssopt|press|allon|alloff|inv-off|inv-on|inv-auto)$/.test(url.pathname)) {
       if (!PASSWORD) return json(200, { text: "Задайте UI_PASSWORD у Railway → Variables, щоб керувати ботом" });
       return json(200, { text: await act(url.pathname.split("/").pop()) });
     }
