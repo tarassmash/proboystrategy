@@ -534,7 +534,7 @@ async function arm(a, opts = {}) {
     symbol: a.symbol, state: "armed", createdAt: now, expiresAt: now + CFG.expiryH * 3600e3, qty, lev,
     hi: align(a.hi, sp.tick, true), lo: align(a.lo, sp.tick, false), mid: align(a.mid, sp.tick, false), width: a.width, squeeze: a.squeeze, er: a.er, atr: a.atr,
     buy: placed.find(p => p.side === "Buy"), sell: placed.find(p => p.side === "Sell"),
-    kind: opts.kind || "breakout", score: a.score ?? null, reasons: a.reasons || [],
+    kind: opts.kind || "breakout", score: a.score ?? null, reasons: a.reasons || [], cfg: cfgSnap(),
   });
   saveSetups();
   const b = placed.find(p => p.side === "Buy"), se = placed.find(p => p.side === "Sell");
@@ -543,6 +543,15 @@ async function arm(a, opts = {}) {
     + `, тейк ${(b || se).tp}, x${lev}, qty ${qty}` + (a.score != null ? `, бал ${a.score}` : "");
 }
 function saveSetups() { LS.set("setups", SETUPS); }
+// the settings a trade was opened with: the journal can then tell which settings make money
+function cfgSnap() {
+  return {
+    style: CFG.scalp ? "scalp" : "breakout", tf: CFG.tf, slMode: CFG.slMode, slPct: CFG.slPct, tpPct: CFG.tpPct, tpR: CFG.tpR,
+    chase: CFG.chase, chaseAt: CFG.chaseAt, chaseGap: CFG.chaseGap, chaseStep: CFG.chaseStep, beR: CFG.beR,
+    squeeze: CFG.squeeze, maxEr: CFG.maxEr, minWidth: CFG.minWidth, maxWidth: CFG.maxWidth, margin: CFG.margin, leverage: CFG.leverage,
+    relax: (typeof AP !== "undefined" && AP.relax) || 0,
+  };
+}
 const legsOf = (s) => [s.buy, s.sell].filter(Boolean);
 async function cancelAll(s) { for (const l of legsOf(s)) await cancelLink(s.symbol, l.id); }
 
@@ -1016,7 +1025,7 @@ async function enterNow(symbol, side, src = null, opts = {}) {
   const now = Date.now();
   const leg = { ...plan, id };
   const s = {
-    symbol, state: "armed", createdAt: now, expiresAt: now + CFG.nowWaitMin * 60e3, qty, lev, now: true,
+    symbol, state: "armed", createdAt: now, expiresAt: now + CFG.nowWaitMin * 60e3, qty, lev, now: true, cfg: cfgSnap(),
     hi: align(a.hi, sp.tick, true), lo: align(a.lo, sp.tick, false), mid: align(a.mid, sp.tick, false),
     width: a.width, squeeze: a.squeeze, er: a.er, atr: a.atr,
     buy: long ? leg : null, sell: long ? null : leg, kind: opts.kind || "now", score: a.score ?? null,
@@ -1171,7 +1180,11 @@ async function recordClose(s, now, forced = "") {
   JOURNAL.push({ symbol: s.symbol, side: long ? "LONG" : "SHORT", entry: s.entry, exit: exitPx, result: why, r: Math.round(rMult * 100) / 100,
     maxR: Math.round((s.maxR || 0) * 100) / 100, pnl: Math.round(pnl * 1e4) / 1e4, openedAt: s.openedAt, closedAt: now,
     width: s.width, squeeze: s.squeeze, er: s.er, lev: s.lev, kind: s.kind || "breakout", score: s.score ?? null, why: (s.reasons || []).join(", "),
-    dipFills: s.dip ? s.dip.fills || 0 : 0, dipCycles: s.dip ? s.dip.cycles || 0 : 0 });
+    dipFills: s.dip ? s.dip.fills || 0 : 0, dipCycles: s.dip ? s.dip.cycles || 0 : 0,
+    cfg: s.cfg || null, movePct: exitPx && e0 ? Math.round((long ? exitPx / e0 - 1 : 1 - exitPx / e0) * 1e4) / 100 : null,
+    maxGain: Math.round((s.maxGain || 0) * 100) / 100, chaseN: s.chaseN || 0,
+    roi: s.cfg && s.cfg.margin ? Math.round(pnl / s.cfg.margin * 1e4) / 100 : null,
+    hour: s.openedAt ? new Date(s.openedAt).getUTCHours() : null, durMin: s.openedAt ? Math.round((now - s.openedAt) / 60000) : null });
   log(`${s.symbol}: закрито — ${why}, ${rMult >= 0 ? "+" : ""}${rMult.toFixed(2)}R, PnL ${pnl >= 0 ? "+" : ""}${pnl.toFixed(4)} USDT`, pnl >= 0 ? "up" : "down");
 }
 async function manage() {
