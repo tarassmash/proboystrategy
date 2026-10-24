@@ -114,6 +114,151 @@ setTimeout(refreshAccount, 1500);
 setInterval(refreshAccount, 30000);
 setInterval(() => log(`heartbeat: ${ev("RUN") ? "RUNNING" : "stopped"}${ev("CFG.scalp") ? " scalp" : ""} · Bybit requests ${ACT.count}`), 10 * 60000);
 
+// ---------------- AI autopilot (fal.ai any-llm) ----------------
+// Every AI_EVERY_MIN minutes the model gets the market, the account, open positions and recent results and
+// returns a JSON decision: trading style, settings, positions to close. The bot applies it only inside hard limits.
+const FAL_KEY = (process.env.FAL_KEY || process.env.FAL_API_KEY || "").trim();
+const FAL_URL = (process.env.FAL_URL || "https://fal.run/fal-ai/any-llm").trim();
+const FAL_MODEL = (process.env.FAL_MODEL || "google/gemini-2.5-flash").trim();
+const AI_EVERY = Math.max(5, Number(process.env.AI_EVERY_MIN || 15));
+const lsGet = (k, d) => { try { const v = W.localStorage.getItem("bx." + k); return v == null ? d : JSON.parse(v); } catch { return d; } };
+const lsSet = (k, v) => { try { W.localStorage.setItem("bx." + k, JSON.stringify(v)); } catch {} };
+const AI = Object.assign({ on: false, last: 0, busy: false, history: [], error: "", maxLev: null, maxMargin: null }, lsGet("ai", {}));
+AI.busy = false;
+const saveAI = () => lsSet("ai", { on: AI.on, last: AI.last, history: AI.history.slice(-30), error: AI.error, maxLev: AI.maxLev, maxMargin: AI.maxMargin });
+const LIMITS = {                       // the AI can never go outside these
+  tpPct: [0.2, 5], slPct: [0.3, 5], tpR: [0.5, 10], chaseAt: [0.3, 0.95], chaseGap: [0.1, 1], chaseStep: [0.1, 3],
+  squeeze: [10, 80], maxEr: [0.2, 0.8], minWidth: [0.2, 5], maxWidth: [0.5, 15], scanMin: [1, 30], refreshMin: [1, 30],
+  beR: [0, 5], expiryH: [0.5, 24], cooldownMin: [5, 600],
+};
+const engineLog = (t, cls) => { try { W.eval(`log(${JSON.stringify(t)}, ${JSON.stringify(cls || "gold-t")})`); } catch {} };
+
+async function marketContext() {
+  const out = {};
+  try {
+    const t = await ev(`bx("/v5/market/tickers", { query: { category: "linear", symbol: "BTCUSDT" } })`);
+    const b = (t.list || [])[0] || {};
+    out.btc = { price: Number(b.lastPrice), change24hPct: +(Number(b.price24hPcnt) * 100).toFixed(2), fundingRate: Number(b.fundingRate) };
+    const k = await ev(`bx("/v5/market/kline", { query: { category: "linear", symbol: "BTCUSDT", interval: "60", limit: "24" } })`);
+    const rows = (k.list || []).map(r => ({ h: +r[2], l: +r[3], c: +r[4] })).reverse();
+    if (rows.length) {
+      const c = rows.map(r => r.c);
+      out.btc.change4hPct = +((c[c.length - 1] / c[Math.max(0, c.length - 5)] - 1) * 100).toFixed(2);
+      out.btc.range24hPct = +((Math.max(...rows.map(r => r.h)) / Math.min(...rows.map(r => r.l)) - 1) * 100).toFixed(2);
+      out.btc.avgHourlyMovePct = +(rows.reduce((a, r) => a + (r.h - r.l) / r.c, 0) / rows.length * 100).toFixed(2);
+    }
+  } catch (e) { out.btcError = String(e && e.message || e); }
+  return out;
+}
+
+function botContext() {
+  return JSON.parse(ev(`JSON.stringify({
+    settings: { scalp: !!CFG.scalp, margin: CFG.margin, leverage: CFG.leverage, slMode: CFG.slMode, slPct: CFG.slPct, tpPct: CFG.tpPct, tpR: CFG.tpR,
+      chase: CFG.chase, chaseAt: CFG.chaseAt, chaseGap: CFG.chaseGap, chaseStep: CFG.chaseStep, beR: CFG.beR,
+      tf: CFG.tf, squeeze: CFG.squeeze, maxEr: CFG.maxEr, minWidth: CFG.minWidth, maxWidth: CFG.maxWidth,
+      scanMin: CFG.scanMin, refreshMin: CFG.refreshMin, expiryH: CFG.expiryH, cooldownMin: CFG.cooldownMin, aiPause: !!CFG.aiPause },
+    slots: AP.slots || CFG.maxSetups, filtersRelaxedStep: AP.relax || 0,
+    positions: POS.map(p => { const s = SETUPS.find(x => x.symbol === p.symbol) || {}; const e = Number(p.avgPrice), m = Number(p.markPrice);
+      return { symbol: p.symbol, side: p.side, entry: e, mark: m, movePct: +(((m - e) / e) * 100 * (p.side === "Buy" ? 1 : -1)).toFixed(2),
+        pnlUsdt: +Number(p.unrealisedPnl || 0).toFixed(4), stop: Number(p.stopLoss) || null, take: Number(p.takeProfit) || null,
+        minutesOpen: s.openedAt ? Math.round((Date.now() - s.openedAt) / 60000) : null, impulseSteps: s.chaseN || 0 }; }),
+    waitingSetups: SETUPS.filter(s => s.state === "armed").length,
+    rockets: ROCKETS.slice(0, 6).map(r => ({ symbol: r.symbol, score: r.score, why: (r.reasons || []).slice(0, 3) })),
+    lastTrades: JOURNAL.filter(j => !j.noTrade).slice(-25).map(j => ({ symbol: j.symbol, side: j.side, r: +Number(j.r || 0).toFixed(2), pnl: +Number(j.pnl || 0).toFixed(4), why: j.result || j.reason || "", kind: j.kind || "" })),
+  })`) || "{}");
+}
+
+const SYSTEM = `You are the risk-aware autopilot of a Bybit USDT-perpetual breakout bot. Every few minutes you receive the market state,
+the bot's settings, open positions and the last closed trades, and you decide how the bot should trade for the next period.
+The bot places Buy Stop above and Sell Stop below squeezed ranges; "scalp" = 5-minute ranges with a fixed take/stop in % of the entry;
+"breakout" = 15-minute ranges with take in R (multiples of the risk). The impulse trailing (chase) moves the stop behind the price and pushes
+the take further once chaseAt of the way to the take is covered.
+Goals: positive expectancy after fees (~0.11% round trip), protect the account first, adapt to the regime (calm range vs trend vs high volatility).
+Rules: take profit must be larger than fees; in scalp keep tpPct >= 0.3; a losing streak or a chaotic market is a reason to pause new entries
+("pause") or to use stricter filters; never suggest removing stops. Close a position only with a clear reason (e.g. the move is exhausted while in profit).
+Answer with ONE JSON object only, no text around it:
+{"regime":"calm|range|trend|volatile|chaotic","mode":"scalp|breakout|pause","settings":{optional keys: tpPct,slPct,tpR,chaseAt,chaseGap,chaseStep,squeeze,maxEr,minWidth,maxWidth,scanMin,refreshMin,beR,expiryH,cooldownMin,leverage},
+"close":["SYMBOL",...],"reason":"short explanation in Ukrainian (1-3 sentences)"}`;
+
+function parseDecision(text) {
+  const m = String(text || "").match(/\{[\s\S]*\}/);
+  if (!m) throw new Error("AI не повернув JSON");
+  return JSON.parse(m[0]);
+}
+
+async function askAI(ctx) {
+  const r = await fetch(FAL_URL, {
+    method: "POST",
+    headers: { Authorization: "Key " + FAL_KEY, "Content-Type": "application/json" },
+    body: JSON.stringify({ model: FAL_MODEL, system_prompt: SYSTEM, prompt: "State:\n" + JSON.stringify(ctx), temperature: 0.2, max_tokens: 800 }),
+    signal: AbortSignal.timeout(90000),
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || j.error) throw new Error(`fal ${r.status}: ${j.error || j.detail && JSON.stringify(j.detail).slice(0, 200) || "помилка"}`);
+  return parseDecision(j.output);
+}
+
+async function applyDecision(d) {
+  const changes = [];
+  const cur = JSON.parse(ev("JSON.stringify(CFG)"));
+  const mode = ["scalp", "breakout", "pause"].includes(d.mode) ? d.mode : null;
+  if (mode === "scalp" && !cur.scalp) { ev(`applyPreset("scalp")`); changes.push("стиль → скальпінг"); }
+  if (mode === "breakout" && cur.scalp) { ev(`applyPreset("normal")`); changes.push("стиль → пробої"); }
+  const pause = mode === "pause";
+  if (pause !== !!cur.aiPause) { ev(`CFG.aiPause = ${pause}`); changes.push(pause ? "нові входи на паузі" : "нові входи знову увімкнено"); }
+  const set = {};
+  for (const [k, v] of Object.entries(d.settings || {})) {
+    const n = Number(v);
+    if (!Number.isFinite(n)) continue;
+    if (k === "leverage") {
+      const cap = AI.maxLev || cur.leverage;
+      const lev = Math.max(1, Math.min(cap, Math.round(n)));
+      if (lev !== cur.leverage) set.leverage = lev;
+      continue;
+    }
+    if (!LIMITS[k]) continue;
+    const val = Math.min(LIMITS[k][1], Math.max(LIMITS[k][0], k === "scanMin" || k === "refreshMin" || k === "cooldownMin" ? Math.round(n) : +n.toFixed(3)));
+    if (val !== cur[k]) set[k] = val;
+  }
+  const fresh = JSON.parse(ev("JSON.stringify(CFG)"));
+  if (fresh.scalp && set.tpPct != null) set.tpPct = Math.max(0.3, set.tpPct);
+  if (Object.keys(set).length) {
+    ev(`Object.assign(CFG, ${JSON.stringify(set)}); LS.set("settings", CFG); buildSettings(); paintAuto();`);
+    changes.push(Object.entries(set).map(([k, v]) => `${k} ${fresh[k]}→${v}`).join(", "));
+  }
+  // close positions the AI wants out of (only real open positions)
+  const open = JSON.parse(ev("JSON.stringify(POS.map(p => ({ symbol: p.symbol, side: p.side, size: p.size, idx: Number(p.positionIdx || 0) })))") || "[]");
+  for (const sym of (Array.isArray(d.close) ? d.close : []).slice(0, 10)) {
+    const p = open.find(x => x.symbol === String(sym).toUpperCase());
+    if (!p) continue;
+    try {
+      await ev(`bx("/v5/order/create", { method: "POST", auth: true, body: { category: "linear", symbol: ${JSON.stringify(p.symbol)}, side: ${JSON.stringify(p.side === "Buy" ? "Sell" : "Buy")}, orderType: "Market", qty: ${JSON.stringify(p.size)}, reduceOnly: true, timeInForce: "IOC", positionIdx: ${p.idx} } })`);
+      changes.push(`закрито ${p.symbol}`);
+    } catch (e) { changes.push(`не закрив ${p.symbol}: ${e.message}`); }
+  }
+  return changes;
+}
+
+async function aiTick(force) {
+  if (!AI.on || AI.busy) return;
+  if (!force && Date.now() - AI.last < AI_EVERY * 60000) return;
+  if (!FAL_KEY) { AI.error = "немає FAL_KEY у Railway → Variables"; return; }
+  AI.busy = true; AI.last = Date.now();
+  try {
+    const ctx = Object.assign({ time: new Date().toISOString() }, await marketContext(), botContext());
+    const d = await askAI(ctx);
+    const changes = await applyDecision(d);
+    const item = { at: Date.now(), regime: d.regime || "", mode: d.mode || "", reason: String(d.reason || "").slice(0, 400), changes };
+    AI.history.push(item); AI.error = "";
+    engineLog(`🧠 AI: ${item.regime} · ${item.mode} — ${item.reason}${changes.length ? " · зміни: " + changes.join("; ") : " · без змін"}`);
+    log("AI decision", JSON.stringify(item));
+  } catch (e) {
+    AI.error = String(e && e.message || e);
+    engineLog(`🧠 AI: помилка — ${AI.error}. Бот торгує з поточними налаштуваннями.`, "down");
+  } finally { AI.busy = false; saveAI(); dumpStorage(); }
+}
+setInterval(() => aiTick(false), 30000);
+
 function state() {
   const s = JSON.parse(ev(`JSON.stringify({
     run: RUN, auto: !!CFG.autopilot, scalp: !!CFG.scalp, tp: CFG.tpPct, sl: CFG.slPct, margin: CFG.margin, lev: CFG.leverage,
@@ -130,6 +275,9 @@ function state() {
   const today = tr.filter(t => t.at >= day);
   return Object.assign(s, {
     logs, acc: ACC, net: NET, env: ENV, keys: HAS_KEYS, password: !!PASSWORD,
+    ai: { on: AI.on, busy: AI.busy, key: !!FAL_KEY, model: FAL_MODEL, every: AI_EVERY, error: AI.error, maxLev: AI.maxLev,
+      next: AI.on ? Math.max(0, Math.round((AI.last + AI_EVERY * 60000 - Date.now()) / 1000)) : null, history: AI.history.slice(-5).reverse() },
+    aiPause: !!ev("CFG.aiPause"),
     lastBybitSec: ACT.last ? Math.round((Date.now() - ACT.last) / 1000) : -1, upMin: Math.round((Date.now() - ACT.started) / 60000),
     stats: {
       all: tr.length, pnl: tr.reduce((a, t) => a + t.pnl, 0), win: tr.length ? Math.round(tr.filter(t => t.pnl > 0).length / tr.length * 100) : null,
@@ -145,6 +293,24 @@ async function act(what) {
     if (!ev("CFG.autopilot")) click("btn-auto"); else click("btn-start");
   } else if (what === "stop") {
     click("btn-stop");
+    if (AI.on) { AI.on = false; ev("CFG.aiPause = false"); saveAI(); }
+  } else if (what === "ai") {
+    if (!FAL_KEY) return "Додайте FAL_KEY (ключ fal.ai) у Railway → Variables, потім увімкніть AI";
+    AI.on = !AI.on;
+    if (AI.on) {
+      AI.last = Date.now();   // the timer waits; the first decision is made right below, once the bot runs
+      AI.maxLev = Number(process.env.AI_MAX_LEVERAGE) || ev("CFG.leverage");   // the AI never raises leverage above this
+      if (!ev("RUN") || !ev("CFG.autopilot")) { if (!ev("CFG.autopilot")) click("btn-auto"); else click("btn-start"); }
+      await new Promise(r => setTimeout(r, 2500));
+      if (!ev("RUN")) { AI.on = false; saveAI(); return "Бот не запустився: " + (ev(`document.getElementById("note-err").textContent`) || "перевірте ключі Bybit"); }
+      engineLog("🧠 AI-автопілот увімкнено: модель " + FAL_MODEL + ", рішення кожні " + AI_EVERY + " хв", "up");
+      saveAI(); aiTick(true);
+    } else {
+      ev("CFG.aiPause = false");
+      engineLog("🧠 AI-автопілот вимкнено: бот лишається на звичайному автопілоті", "mute");
+      saveAI();
+    }
+    return "OK";
   } else if (what === "scalp") {
     ev(`applyPreset(CFG.scalp ? "normal" : "scalp")`);
   } else return "Невідома дія";
@@ -164,6 +330,7 @@ const PAGE = `<!doctype html><html lang="uk"><head><meta charset="utf-8"><meta n
 .card{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:16px;margin-top:14px}
 .big{width:100%;min-height:72px;border-radius:16px;border:0;font-size:22px;font-weight:700;cursor:pointer}
 .go{background:var(--up);color:#06281b}.stop{background:var(--down);color:#fff}.sc{background:transparent;border:2px solid var(--gold);color:var(--gold);min-height:60px;font-size:18px}.sc.on{background:var(--gold);color:#111}
+.ai{background:transparent;border:2px solid #a78bfa;color:#c4b5fd;min-height:60px;font-size:18px}.ai.on{background:#7c3aed;border-color:#7c3aed;color:#fff}
 .big:disabled{opacity:.5;cursor:default}.row{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px}
 .k b{display:block;font:600 18px ui-monospace,monospace}.k span{font-size:12px;color:var(--mute)}
 .dot{display:inline-block;width:10px;height:10px;border-radius:50%;background:var(--mute);margin-right:6px}.dot.on{background:var(--up);box-shadow:0 0 10px var(--up)}
@@ -175,6 +342,8 @@ table{width:100%;border-collapse:collapse;font-size:13px}td,th{padding:6px 4px;b
 <div class="card"><div style="font-size:18px;font-weight:600"><span class="dot" id="dot"></span><span id="status">…</span></div>
 <div class="mute" id="status2" style="margin-top:4px"></div>
 <div style="margin-top:14px"><button class="big go" id="main">▶ Запустити</button></div>
+<div style="margin-top:10px"><button class="big ai" id="ai">🧠 AI-автопілот</button></div>
+<div id="aiLine" style="font-size:13px;margin-top:6px"></div>
 <div style="margin-top:10px"><button class="big sc" id="scalp">⚡ Скальпінг</button></div>
 <div id="chaseLine" style="font-size:13px;margin-top:10px"></div>
 <div class="mute" id="scalpHint" style="font-size:12px;margin-top:6px">Скальпінг: короткі угоди, тейк +0.5%, стоп −1% від входу, скан щохвилини.</div>
@@ -184,6 +353,7 @@ table{width:100%;border-collapse:collapse;font-size:13px}td,th{padding:6px 4px;b
 <div class="k"><span>Сьогодні угод / PnL</span><b id="td">—</b></div><div class="k"><span>Усього угод · win</span><b id="all">—</b></div></div>
 <div class="card"><b>Позиції</b><div class="scroll"><table><thead><tr><th>Монета</th><th>Бік</th><th>Вхід</th><th>Ціна</th><th>PnL</th><th>Стоп / Тейк</th><th>Імпульс</th></tr></thead><tbody id="pos"></tbody></table></div></div>
 <div class="card"><b>Заявки бота на біржі</b><div class="scroll"><table><thead><tr><th>Монета</th><th>Стан</th><th>Buy Stop</th><th>Sell Stop</th></tr></thead><tbody id="set"></tbody></table></div></div>
+<div class="card" id="aiCard" style="display:none"><b>🧠 Рішення AI</b><div id="aiHist" class="log"></div></div>
 <div class="card"><b>Що робить бот</b><div class="log" id="log"></div></div>
 <div class="mute" style="font-size:12px;margin:14px 0" id="foot"></div>
 </div><script>
@@ -196,6 +366,12 @@ $("status2").textContent=on?("Наступний скан через "+S.nextSca
 const m=$("main");m.textContent=on?"■ Зупинити":"▶ Запустити";m.className="big "+(on?"stop":"go");m.disabled=busy;
 const sc=$("scalp");sc.className="big sc"+(S.scalp?" on":"");sc.textContent=S.scalp?"⚡ Скальпінг увімкнено · +"+S.tp+"% / −"+S.sl+"%":"⚡ Скальпінг";sc.disabled=busy;
 const w=[];if(!S.keys)w.push("Немає ключів Bybit: Railway → Variables → BYBIT_API_KEY, BYBIT_API_SECRET");if(S.net.ok===false)w.push(S.net.text);if(S.acc.error&&S.net.ok!==false)w.push("Bybit: "+S.acc.error);if(S.err)w.push(S.err);
+const A=S.ai||{};const ab=$("ai");ab.className="big ai"+(A.on?" on":"");ab.disabled=busy||A.busy;
+ab.textContent=A.on?(A.busy?"🧠 AI думає…":"🧠 AI-автопілот увімкнено"):"🧠 AI-автопілот";
+$("aiLine").innerHTML=!A.key?'<span class="down">Для AI додайте FAL_KEY у Railway → Variables</span>':A.on?'<span style="color:#c4b5fd">Модель '+esc(A.model)+" · наступне рішення через "+Math.round((A.next||0)/60)+" хв"+(S.aiPause?' · <b>нові входи на паузі (рішення AI)</b>':"")+(A.maxLev?" · плече не вище x"+A.maxLev:"")+"</span>"+(A.error?'<br><span class="down">'+esc(A.error)+"</span>":""):'<span class="mute">AI кожні '+A.every+" хв аналізує ринок, рахунок і угоди та сам міняє стиль (скальпінг / пробої / пауза), тейк, стоп, трейлінг і фільтри</span>";
+$("aiCard").style.display=(A.history||[]).length?"":"none";
+$("aiHist").innerHTML=(A.history||[]).map(h=>"<div>"+new Date(h.at).toLocaleTimeString()+' · <b style="color:#c4b5fd">'+esc(h.regime)+" · "+esc(h.mode)+"</b> — "+esc(h.reason)+(h.changes&&h.changes.length?'<br><span class="up">'+esc(h.changes.join("; "))+"</span>":"")+"</div>").join("");
+$("scalpHint").textContent="Скальпінг: короткі угоди, тейк +"+(S.scalp?S.tp:0.5)+"%, стоп −"+(S.scalp?S.sl:1)+"% від входу, скан щохвилини.";
 $("chaseLine").innerHTML=S.chase?'<span class="up">🚀 Трейлінг стопа і тейку увімкнено</span> <span class="mute">— після '+Math.round(S.chaseAt*100)+"% шляху до тейку стоп іде за ціною, а тейк відсувається далі в бік руху, щоб забрати весь імпульс</span>":'<span class="mute">Трейлінг стопа і тейку вимкнено</span>';
 $("warn").innerHTML=w.map(x=>'<div class="note warn">'+esc(x)+"</div>").join("");
 $("eq").textContent=f(S.acc.equity);$("av").textContent=f(S.acc.available);
@@ -207,6 +383,7 @@ $("log").innerHTML=S.logs.length?S.logs.map(l=>"<div>"+esc(l)+"</div>").join("")
 $("foot").textContent=S.env+" · "+S.net.text+" · останній запит до Bybit "+(S.lastBybitSec>=0?S.lastBybitSec+" с тому":"—")+" · сервер працює "+S.upMin+" хв";}
 async function act(what,q){if(q&&!confirm(q))return;busy=true;paint();try{const r=await fetch("/api/"+what,{method:"POST"}).then(r=>r.json());if(r.text&&r.text!=="OK")alert(r.text)}catch(e){alert("Немає зв'язку з сервером")}busy=false;await load()}
 $("main").onclick=()=>{const on=S&&S.run&&S.auto;on?act("stop","Зупинити бота? Заявки бота, що чекають пробою, буде знято. Відкриті позиції лишаться зі своїм стопом і тейком."):act("start",S&&S.env==="mainnet"?"Запустити торгівлю на реальному рахунку?":"")};
+$("ai").onclick=()=>act("ai",S&&S.ai&&!S.ai.on?"Увімкнути AI-автопілот? AI сам керуватиме стилем торгівлі, тейком, стопом, фільтрами і може закривати позиції. Маржу не змінює, плече не піднімає вище поточного. Прибуток не гарантовано.":"");
 $("scalp").onclick=()=>act("scalp",S&&!S.scalp?"Увімкнути скальпінг? Тейк +0.5%, стоп −1% від входу. Діє на нові заявки.":"");
 load();setInterval(load,3000);
 </script></body></html>`;
@@ -226,7 +403,7 @@ http.createServer(async (req, res) => {
   if (!authorised(req)) { res.writeHead(401, { "WWW-Authenticate": 'Basic realm="Proboy Autopilot"' }); return res.end("Потрібен пароль (UI_PASSWORD)"); }
   try {
     if (url.pathname === "/api/state") return json(200, state());
-    if (req.method === "POST" && /^\/api\/(start|stop|scalp)$/.test(url.pathname)) {
+    if (req.method === "POST" && /^\/api\/(start|stop|scalp|ai)$/.test(url.pathname)) {
       if (!PASSWORD) return json(200, { text: "Задайте UI_PASSWORD у Railway → Variables, щоб керувати ботом" });
       return json(200, { text: await act(url.pathname.split("/").pop()) });
     }

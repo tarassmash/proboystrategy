@@ -1448,7 +1448,7 @@ async function loop() {
     }
     if (Date.now() - lastScan >= CFG.scanMin * 60e3) {
       lastScan = Date.now();
-      if (CFG.autopilot) await autopilotScan();
+      if (CFG.autopilot && !CFG.aiPause) await autopilotScan();  // aiPause: the AI autopilot decided not to open new trades now
       else if (CFG.mode === "rocket") await scanRocket(true); else await scan();
     }
     showErr("");
