@@ -4,7 +4,8 @@
 // Every parameter can be set by the AI autopilot.
 "use strict";
 
-const WebSocket = require("ws");
+// on the server the "ws" package; in the browser the page passes its own WebSocket wrapper (opts.WebSocket)
+const WebSocketNode = typeof require === "function" ? (() => { try { return require("ws"); } catch (e) { return null; } })() : null;
 
 const DEFAULTS = {
   on: false,
@@ -52,7 +53,21 @@ const DEFAULTS = {
 const PRESSURE = { style: "pressure", tpPct: 0.08, slPct: 0.25, scoreIn: 0.55, entryWaitSec: 5, timeStopSec: 45, holdMaxSec: 120,
   ride: false, adaptive: false, flipExit: true, cancelOnFade: true, needAgree: false, maxPositions: 3, cooldownSec: 20 };
 
-function create({ ev, log, engineLog, lsGet, lsSet, env, testWs }) {
+// host: functions of the environment. On the server they talk to the breakout engine (via ev); a standalone page passes its own.
+//   bx(path, opts) -> Bybit REST result, spec(sym) -> {tick, step, minQty, minNotional, maxLev}, align(v, step, up) -> string,
+//   reserve(symbols, amount), freeCoins() -> number, equity() -> number, busy() -> [symbols of other bots' positions]
+function create({ ev, log, engineLog, lsGet, lsSet, env, testWs, host, WebSocket: WSImpl }) {
+  const WebSocket = WSImpl || WebSocketNode;
+  const H = Object.assign({
+    bx: (path, opts) => ev(`bx(${JSON.stringify(path)}, ${JSON.stringify(opts)})`),
+    spec: (sym) => ev(`spec(${JSON.stringify(sym)})`),
+    align: (v, step, up) => ev(`align(${v}, ${JSON.stringify(String(step))}, ${up})`),
+    reserve: (list, amount) => { try { ev(`window.__ssSyms = ${JSON.stringify(list)}; window.__ssReserve = ${amount}`); } catch (e) { /* ignore */ } },
+    freeCoins: () => ev(`(async () => { let n = 0; for (const s of SETUPS.filter(x => x.state === "armed" && (window.__ssSyms || []).includes(x.symbol))) {
+        await cancelAll(s); await cancelDip(s); SETUPS = SETUPS.filter(x => x !== s); n++; } if (n) saveSetups(); return n; })()`),
+    equity: () => Number(ev("(window.__eq || 0)")) || 0,
+    busy: () => JSON.parse(ev(`JSON.stringify(POS.map(p => p.symbol).concat(SETUPS.filter(s => s.state !== "armed").map(s => s.symbol)))`) || "[]"),
+  }, host || {});
   let ST_PICK_NOW = false;
   const P = Object.assign({}, DEFAULTS, lsGet("ss", {}));
   if (!P.v) { if (P.scoreIn === 0.6 || P.scoreIn === 0.62) P.scoreIn = DEFAULTS.scoreIn; P.v = 2; }   // the first threshold was too strict for the live market
@@ -202,9 +217,9 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs }) {
   }
 
   // ---------------- orders ----------------
-  const bx = (path, opts) => ev(`bx(${JSON.stringify(path)}, ${JSON.stringify(opts)})`);
-  const specOf = (sym) => ev(`spec(${JSON.stringify(sym)})`);
-  const alignP = (v, step, up) => ev(`align(${v}, ${JSON.stringify(String(step))}, ${up})`);
+  const bx = (path, opts) => H.bx(path, opts);
+  const specOf = (sym) => H.spec(sym);
+  const alignP = (v, step, up) => H.align(v, step, up);
   const lid = (sym, tag) => ("ss" + tag + sym.slice(0, 10) + Date.now().toString(36) + Math.floor(Math.random() * 99)).slice(0, 36);
   // position mode of the account: one-way (positionIdx 0) or hedge (1 = long side, 2 = short side); found out on the first order
   const idxFor = (posSide) => ST.hedge ? (posSide === "Buy" ? 1 : 2) : 0;
@@ -302,11 +317,10 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs }) {
   }
 
   // the breakout bot keeps away from our coins; its waiting orders on them are removed
-  const W_SET = (list) => { try { ev(`window.__ssSyms = ${JSON.stringify(list)}; window.__ssReserve = ${P.on ? P.maxPositions * P.margin * 1.1 : 0}`); } catch (e) { /* ignore */ } };
+  const W_SET = (list) => H.reserve(list, P.on ? P.maxPositions * P.margin * 1.1 : 0);
   async function freeCoins() {
     try {
-      const n = await ev(`(async () => { let n = 0; for (const s of SETUPS.filter(x => x.state === "armed" && (window.__ssSyms || []).includes(x.symbol))) {
-        await cancelAll(s); await cancelDip(s); SETUPS = SETUPS.filter(x => x !== s); n++; } if (n) saveSetups(); return n; })()`);
+      const n = await H.freeCoins();
       if (n) engineLog(`⚡⚡ Суперскальпінг забрав свої монети: знято ${n} заявок пробою на них`, "mute");
     } catch (e) { /* next time */ }
   }
@@ -484,7 +498,7 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs }) {
       const day = new Date().toISOString().slice(0, 10);
       if (ST.day !== day) { ST.day = day; ST.dayPnl = 0; ST.stoppedForDay = false; }
       if (P.on && !ST.stoppedForDay) {
-        const eq = Number(ev("(window.__eq || 0)")) || 0;
+        const eq = Number(H.equity()) || 0;
         if (P.dailyLossPct > 0 && eq > 0 && ST.dayPnl <= -eq * P.dailyLossPct / 100) {
           ST.stoppedForDay = true;
           engineLog(`⚡⚡ Суперскальпінг: денний збиток ${ST.dayPnl.toFixed(2)} USDT ≥ ${P.dailyLossPct}% капіталу — нові входи до завтра вимкнено`, "down");
@@ -580,7 +594,7 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs }) {
       }
       // new entries
       if (P.on && !ST.stoppedForDay && (ST.noMoneyUntil || 0) < now && Object.keys(POSN).length < P.maxPositions) {
-        const busySyms = new Set(JSON.parse(ev(`JSON.stringify(POS.map(p => p.symbol).concat(SETUPS.filter(s => s.state !== "armed").map(s => s.symbol)))`) || "[]"));
+        const busySyms = new Set(H.busy() || []);
         for (const sym of P.symbols) if (busySyms.has(sym) && M[sym] && !POSN[sym]) M[sym].why = "позиція основного бота";
         const cands = P.symbols.map(signals).filter(Boolean)
           .filter(s => !POSN[s.sym] && !busySyms.has(s.sym) && (COOL[s.sym] || 0) < now && s.spreadTicks <= 3)
