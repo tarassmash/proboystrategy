@@ -1,0 +1,339 @@
+<!doctype html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Стакан-скальпер</title>
+<style>
+:root{--bg:#0b0e11;--panel:#161a1e;--line:#2b3139;--ink:#eaecef;--mute:#848e9c;--up:#0ecb81;--down:#f6465d;--gold:#f7a600;--cyan:#22d3ee}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.45 system-ui,-apple-system,Segoe UI,sans-serif}
+.wrap{max-width:760px;margin:0 auto;padding:16px}h1{font-size:20px;margin:4px 0 2px}.mute{color:var(--mute)}.up{color:var(--up)}.down{color:var(--down)}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:16px;margin-top:14px}
+.big{width:100%;min-height:68px;border-radius:16px;border:0;font-size:21px;font-weight:700;cursor:pointer}.go{background:var(--up);color:#06281b}.stop{background:var(--down);color:#fff}
+.big:disabled{opacity:.5;cursor:default}
+.seg{display:grid;grid-auto-flow:column;grid-auto-columns:1fr;border:1px solid var(--line);border-radius:12px;overflow:hidden;margin-top:6px}
+.seg button{min-height:42px;border:0;background:var(--bg);color:var(--mute);font-size:14px;cursor:pointer}.seg button.on{background:var(--cyan);color:#062a30;font-weight:700}
+.seg.inv button.on{background:#f59e0b;color:#111}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px}
+label.f{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--mute)}
+input,select{min-height:40px;border-radius:10px;border:1px solid var(--line);background:var(--bg);color:var(--ink);padding:0 10px;font:14px ui-monospace,monospace;width:100%}
+.btn{min-height:40px;border-radius:10px;border:1px solid var(--line);background:var(--bg);color:var(--ink);padding:0 12px;cursor:pointer}
+.k b{display:block;font:600 18px ui-monospace,monospace}.k span{font-size:12px;color:var(--mute)}
+.dot{display:inline-block;width:10px;height:10px;border-radius:50%;background:var(--mute);margin-right:6px}.dot.on{background:var(--up);box-shadow:0 0 10px var(--up)}
+table{width:100%;border-collapse:collapse;font-size:12px}td,th{padding:6px 4px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap}th{color:var(--mute);font-weight:500}
+.scroll{overflow-x:auto}.log div{font:12px ui-monospace,monospace;padding:4px 0;border-bottom:1px solid var(--line);color:var(--mute)}
+.note{border-radius:12px;padding:10px 12px;margin-top:10px;font-size:13px;background:rgba(246,70,93,.1);border:1px solid rgba(246,70,93,.4)}
+.ok{background:rgba(14,203,129,.08);border-color:rgba(14,203,129,.4)}
+details summary{cursor:pointer;color:var(--mute);font-size:13px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>📊 Стакан-скальпер</h1>
+  <div class="mute" style="font-size:13px">Торгівля по стакану Bybit: тиск стакану, стрічка, айсберги, поглинання, спуфінг. Вхід і тейк — лімітки. Працює, поки ця вкладка відкрита.</div>
+
+  <div class="card" id="keysCard">
+    <b>Підключення Bybit</b>
+    <div class="grid" style="margin-top:8px">
+      <label class="f">API Key<input id="kKey" autocomplete="off" spellcheck="false"></label>
+      <label class="f">API Secret<input id="kSecret" type="password" autocomplete="off" spellcheck="false"></label>
+      <label class="f">Рахунок<select id="kEnv"><option value="mainnet">mainnet (реальні гроші)</option><option value="testnet">testnet (учбовий)</option></select></label>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;align-items:center">
+      <button class="btn" id="kTest">Перевірити</button>
+      <label style="font-size:13px" class="mute"><input type="checkbox" id="kRemember" style="width:auto;min-height:0"> запам'ятати ключі в цьому браузері</label>
+    </div>
+    <div id="kOut" style="font-size:13px;margin-top:6px"></div>
+    <div class="mute" style="font-size:12px;margin-top:6px">Ключ: права Read + Contract Trade, без Withdrawal. Ключі йдуть лише на api.bybit.com.</div>
+  </div>
+
+  <div class="card">
+    <div style="font-size:19px;font-weight:700"><span class="dot" id="dot"></span><span id="status">Зупинено</span></div>
+    <div class="mute" id="status2" style="font-size:13px;margin-top:4px"></div>
+    <div style="margin-top:12px"><button class="big go" id="main">▶ Запустити</button></div>
+    <div style="margin-top:12px;font-size:14px;font-weight:600">Стиль</div>
+    <div class="seg" id="styleSeg"><button data-style="pressure">📊 Тиск стакану</button><button data-style="flow">⚡ Потік ордерів</button></div>
+    <div class="mute" id="styleHint" style="font-size:12px;margin-top:4px"></div>
+    <div style="margin-top:12px;font-size:14px;font-weight:600">🔄 Усе навпаки (Buy ↔ Sell)</div>
+    <div class="seg inv" id="invSeg"><button data-inv="off">Вимк</button><button data-inv="auto">Авто</button><button data-inv="on">Увімк</button></div>
+    <div class="mute" id="invHint" style="font-size:12px;margin-top:4px"></div>
+    <div id="warn"></div>
+  </div>
+
+  <div class="card grid">
+    <div class="k"><span>Капітал, USDT</span><b id="eq">—</b></div>
+    <div class="k"><span>Сьогодні</span><b id="day">—</b></div>
+    <div class="k"><span>Угод · win</span><b id="all">—</b></div>
+    <div class="k"><span>PnL · PF</span><b id="pnl">—</b></div>
+  </div>
+
+  <div class="card">
+    <details><summary>Налаштування (необов'язково — оптимізатор підбирає тейк і стоп сам)</summary>
+      <div class="grid" style="margin-top:10px">
+        <label class="f">Маржа на угоду, USDT<input id="sMargin" inputmode="decimal"></label>
+        <label class="f">Плече<input id="sLev" inputmode="decimal"></label>
+        <label class="f">Угод одночасно<input id="sMax" inputmode="decimal"></label>
+        <label class="f">Тейк, %<input id="sTp" inputmode="decimal"></label>
+        <label class="f">Стоп, %<input id="sSl" inputmode="decimal"></label>
+        <label class="f">Поріг сигналу (0–1)<input id="sScore" inputmode="decimal"></label>
+        <label class="f">Монети<select id="sCoins"><option value="auto">Авто: топ волатильності</option><option value="manual">Свої</option></select></label>
+        <label class="f">Свої монети (через кому)<input id="sSyms" placeholder="BTCUSDT, ETHUSDT"></label>
+        <label class="f">Мін. обіг 24 год, млн $<input id="sTurn" inputmode="decimal"></label>
+      </div>
+      <div style="margin-top:8px"><button class="btn" id="sSave">Зберегти</button> <span id="sOut" class="mute" style="font-size:13px"></span></div>
+    </details>
+  </div>
+
+  <div class="card">
+    <b>Стакан і стрічка наживо</b> <span class="mute" id="coinsLine" style="font-size:12px"></span>
+    <div class="scroll"><table><thead><tr><th>Монета</th><th>Тиск · черга</th><th>Стакан</th><th>Дельта</th><th>Сплеск</th><th>Сигнали</th><th>Лонг</th><th>Шорт</th><th>Чому немає входу</th></tr></thead><tbody id="live"></tbody></table></div>
+  </div>
+
+  <div class="card">
+    <b>Угоди зараз</b>
+    <div class="scroll"><table><thead><tr><th>Угода</th><th>Стан</th><th>Вхід</th><th>Тейк</th><th>Стоп</th><th>с</th></tr></thead><tbody id="open"></tbody></table></div>
+  </div>
+
+  <div class="card">
+    <b>🎯 Навчання на своїх угодах</b>
+    <div id="learn" style="font-size:13px;margin-top:6px"></div>
+    <div style="margin-top:8px"><button class="btn" id="opt">Оптимізувати тейк і стоп зараз</button> <span id="optOut" class="mute" style="font-size:13px"></span></div>
+  </div>
+
+  <div class="card"><b>Закриті угоди</b><div class="log" id="trades"></div></div>
+  <div class="card"><b>Що робить бот</b><div class="log" id="log"></div></div>
+</div>
+
+<script>
+// a clock inside a Worker keeps ticking in a background tab (page timers get slowed down there)
+const TIMERS = []; let WK = null;
+try {
+  WK = new Worker(URL.createObjectURL(new Blob(["setInterval(function(){postMessage(0)},250)"], { type: "text/javascript" })));
+  WK.onmessage = () => { const now = Date.now(); for (const t of TIMERS.slice()) if (now >= t.next) { t.next = now + t.ms; try { t.fn(); } catch (e) { console.error(e); } } };
+} catch (e) { WK = null; }
+function wSetInterval(fn, ms) { if (!WK) return setInterval(fn, ms); const t = { fn, ms, next: Date.now() + ms }; TIMERS.push(t); return t; }
+function wClearInterval(t) { if (t && typeof t === "object") { const i = TIMERS.indexOf(t); if (i >= 0) TIMERS.splice(i, 1); } else clearInterval(t); }
+</script>
+<script>
+// ---- the order-book scalping module (same code as on the server) ----
+(function () {
+  const module = { exports: {} };
+  (function (setInterval, clearInterval) {
+/*__SUPERSCALP__*/
+  })(wSetInterval, wClearInterval);
+  window.SuperScalp = module.exports;
+})();
+</script>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const f = (v, d = 2) => v == null || isNaN(v) ? "—" : Number(v).toFixed(d);
+const LS = {
+  get(k, d) { try { const v = localStorage.getItem("ob." + k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } },
+  set(k, v) { try { localStorage.setItem("ob." + k, JSON.stringify(v)); } catch (e) { /* blocked */ } },
+  del(k) { try { localStorage.removeItem("ob." + k); } catch (e) { /* blocked */ } },
+};
+// test hooks: ?rest=http://127.0.0.1:9000&ws=ws://127.0.0.1:9001 (only for automated checks)
+const QP = new URLSearchParams(location.search);
+const ENV = LS.get("env", "mainnet");
+const REST = QP.get("rest") || (ENV === "testnet" ? "https://api-testnet.bybit.com" : "https://api.bybit.com");
+const WSURL = QP.get("ws") || "";
+const KEYS = LS.get("keys", null) || (() => { try { return JSON.parse(sessionStorage.getItem("ob.keys") || "null"); } catch (e) { return null; } })() || { key: "", secret: "" };
+$("kKey").value = KEYS.key || ""; $("kSecret").value = KEYS.secret || ""; $("kEnv").value = ENV; $("kRemember").checked = !!LS.get("keys", null);
+
+// ---- Bybit REST ----
+let OFFSET = 0;
+async function hmac(secret, msg) {
+  const e = new TextEncoder();
+  const k = await crypto.subtle.importKey("raw", e.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const s = await crypto.subtle.sign("HMAC", k, e.encode(msg));
+  return Array.from(new Uint8Array(s)).map(b => b.toString(16).padStart(2, "0")).join("");
+}
+class BybitErr extends Error { constructor(m, code) { super(m); this.code = code; } }
+async function bx(path, { method = "GET", query = null, body = null, auth = false } = {}, retry = true) {
+  const qs = query ? new URLSearchParams(Object.entries(query).filter(([, v]) => v != null).map(([k, v]) => [k, String(v)])).toString() : "";
+  const bodyStr = method === "POST" ? JSON.stringify(body || {}) : "";
+  const headers = {};
+  if (method === "POST") headers["Content-Type"] = "application/json";
+  if (auth) {
+    if (!KEYS.key || !KEYS.secret) throw new BybitErr("Введіть API Key і Secret");
+    const ts = String(Date.now() + OFFSET), recv = "10000";
+    Object.assign(headers, { "X-BAPI-API-KEY": KEYS.key, "X-BAPI-TIMESTAMP": ts, "X-BAPI-RECV-WINDOW": recv,
+      "X-BAPI-SIGN": await hmac(KEYS.secret, ts + KEYS.key + recv + (method === "GET" ? qs : bodyStr)) });
+  }
+  let res;
+  try { res = await fetch(REST + path + (qs ? "?" + qs : ""), { method, headers, body: method === "POST" ? bodyStr : undefined }); }
+  catch (e) { throw new BybitErr(auth ? "Браузер не дав надіслати підписаний запит до Bybit (мережа або CORS)" : "Немає зв'язку з Bybit"); }
+  const j = await res.json().catch(() => ({}));
+  if ((res.status === 403 || res.status === 451) && j.retCode === undefined) throw new BybitErr("Bybit блокує вашу країну/IP (HTTP " + res.status + "). Вимкніть VPN США.", 403);
+  if (j.retCode === 10002 && retry) { await syncTime(); return bx(path, { method, query, body, auth }, false); }
+  if (j.retCode !== 0) throw new BybitErr((j.retMsg || "HTTP " + res.status) + (j.retCode ? ` (${j.retCode})` : ""), j.retCode);
+  return j.result || {};
+}
+async function syncTime() { try { const r = await bx("/v5/market/time"); OFFSET = Math.round(Number(r.timeNano) / 1e6) - Date.now(); } catch (e) { /* keep */ } }
+const SPEC = {};
+async function spec(sym) {
+  if (SPEC[sym]) return SPEC[sym];
+  const r = await bx("/v5/market/instruments-info", { query: { category: "linear", symbol: sym } });
+  const row = (r.list || [])[0]; if (!row) throw new BybitErr("Немає " + sym);
+  return SPEC[sym] = { tick: row.priceFilter.tickSize, step: row.lotSizeFilter.qtyStep, minQty: Number(row.lotSizeFilter.minOrderQty || 0),
+    minNotional: Number(row.lotSizeFilter.minNotionalValue || 5), maxLev: Number((row.leverageFilter || {}).maxLeverage || 10) };
+}
+const dec = (s) => { s = String(s); return s.includes(".") ? s.split(".")[1].length : 0; };
+function align(v, step, up) {
+  const d = dec(step), k = 10 ** d, st = Math.max(1, Math.round(Number(step) * k));
+  const n = up ? Math.ceil(Math.ceil(v * k - 1e-6) / st) * st : Math.floor(Math.floor(v * k + 1e-6) / st) * st;
+  return (n / k).toFixed(d);
+}
+
+// ---- account: equity and positions of anything else (the scalper keeps away from them) ----
+const ACC = { equity: null, available: null, busy: [], err: "" };
+async function refreshAccount() {
+  if (!KEYS.key || !KEYS.secret) return;
+  try {
+    const w = await bx("/v5/account/wallet-balance", { query: { accountType: "UNIFIED" }, auth: true });
+    const a = (w.list || [])[0] || {};
+    ACC.equity = Number(a.totalEquity || 0); ACC.available = Number(a.totalAvailableBalance || 0); ACC.err = "";
+    const p = await bx("/v5/position/list", { query: { category: "linear", settleCoin: "USDT", limit: "200" }, auth: true });
+    const own = new Set(((SS && SS.view().open) || []).map(o => o.sym));
+    ACC.busy = (p.list || []).filter(x => Number(x.size) > 0 && !own.has(x.symbol)).map(x => x.symbol);
+  } catch (e) { ACC.err = e.message; }
+}
+
+// ---- event log ----
+const EVENTS = LS.get("events", []);
+function addLog(text, cls) {
+  EVENTS.unshift([new Date().toLocaleTimeString(), String(text), cls || ""]); EVENTS.length = Math.min(EVENTS.length, 200); LS.set("events", EVENTS);
+  $("log").innerHTML = EVENTS.slice(0, 80).map(e => `<div class="${e[2] === "down" ? "down" : e[2] === "up" ? "up" : ""}">${esc(e[0])} · ${esc(e[1])}</div>`).join("");
+}
+addLog("Сторінку відкрито", "mute");
+
+// ---- WebSocket with the .on() API the module expects ----
+class WSWrap {
+  constructor(url) {
+    this.h = {}; this.w = new WebSocket(WSURL || url);
+    this.w.onopen = () => this.emit("open"); this.w.onmessage = (e) => this.emit("message", e.data);
+    this.w.onclose = () => this.emit("close"); this.w.onerror = () => this.emit("error", { message: "з'єднання перервано" });
+  }
+  on(ev, fn) { (this.h[ev] = this.h[ev] || []).push(fn); }
+  emit(ev, ...a) { (this.h[ev] || []).forEach(fn => { try { fn(...a); } catch (e) { console.error(e); } }); }
+  send(d) { if (this.w.readyState === 1) this.w.send(d); }
+  close() { try { this.w.close(); } catch (e) { /* closed */ } }
+}
+
+// ---- the scalper ----
+const SS = window.SuperScalp.create({
+  ev: () => { throw new Error("no engine"); },
+  log: (...a) => console.log("[scalper]", ...a),
+  engineLog: (t, cls) => addLog(t, cls),
+  lsGet: (k, d) => LS.get(k, d), lsSet: (k, v) => LS.set(k, v),
+  env: ENV, testWs: WSURL,
+  WebSocket: WSWrap,
+  host: {
+    bx, spec, align,
+    reserve: () => {}, freeCoins: async () => 0,
+    equity: () => ACC.equity || 0,
+    busy: () => ACC.busy,
+  },
+});
+// the order-book page starts in the "pressure" style unless the owner chose otherwise
+if (!LS.get("styleChosen", false)) { SS.setStyle("pressure"); LS.set("styleChosen", true); }
+wSetInterval(refreshAccount, 15000);
+syncTime().then(refreshAccount);
+
+// wake lock: the screen may dim, the tab must stay alive
+let WAKE = null;
+async function wake(on) { try { if (on && "wakeLock" in navigator) WAKE = await navigator.wakeLock.request("screen"); else if (!on && WAKE) { await WAKE.release(); WAKE = null; } } catch (e) { /* not supported */ } }
+document.addEventListener("visibilitychange", () => { if (SS.params.on && document.visibilityState === "visible") wake(true); });
+window.addEventListener("beforeunload", (e) => { if (SS.params.on) { e.preventDefault(); e.returnValue = ""; } });
+if (SS.params.on) { wake(true); addLog("Скальпер продовжує роботу після перезавантаження сторінки", "up"); }
+
+// ---- controls ----
+function saveKeys() {
+  KEYS.key = $("kKey").value.trim(); KEYS.secret = $("kSecret").value.trim();
+  try { sessionStorage.setItem("ob.keys", JSON.stringify(KEYS)); } catch (e) { /* blocked */ }
+  if ($("kRemember").checked) LS.set("keys", KEYS); else LS.del("keys");
+}
+$("kEnv").onchange = () => { LS.set("env", $("kEnv").value); saveKeys(); if (SS.params.on) SS.setOn(false); location.reload(); };
+$("kTest").onclick = async () => {
+  saveKeys(); $("kOut").textContent = "Перевіряю…";
+  try { await syncTime(); await refreshAccount(); if (ACC.err) throw new Error(ACC.err);
+    $("kOut").innerHTML = `<span class="up">Підключено.</span> Капітал ${f(ACC.equity)} USDT, вільно ${f(ACC.available)} USDT`; }
+  catch (e) { $("kOut").innerHTML = `<span class="down">${esc(e.message)}</span>`; }
+};
+$("main").onclick = async () => {
+  if (SS.params.on) { if (confirm("Зупинити скальпер? Нові входи не відкриватимуться, відкриті угоди доведе до тейку/стопу.")) { SS.setOn(false); wake(false); } paint(); return; }
+  saveKeys();
+  if (!KEYS.key || !KEYS.secret) { alert("Впишіть API Key і Secret"); return; }
+  await syncTime(); await refreshAccount();
+  if (ACC.err) { alert("Не підключився: " + ACC.err); return; }
+  if (ENV === "mainnet" && !confirm("Запустити торгівлю по стакану на реальному рахунку?")) return;
+  SS.setOn(true); wake(true); paint();
+};
+document.querySelectorAll("[data-style]").forEach(b => b.onclick = () => { SS.setStyle(b.dataset.style); LS.set("styleChosen", true); paint(); });
+document.querySelectorAll("[data-inv]").forEach(b => b.onclick = () => { SS.setParams({ invert: b.dataset.inv }); addLog(`🔄 Усе навпаки: ${b.dataset.inv === "on" ? "увімкнено" : b.dataset.inv === "off" ? "вимкнено" : "авто"}`, "mute"); paint(); });
+function fillSettings() {
+  const P = SS.params;
+  $("sMargin").value = P.margin; $("sLev").value = P.leverage; $("sMax").value = P.maxPositions; $("sTp").value = P.tpPct; $("sSl").value = P.slPct;
+  $("sScore").value = P.scoreIn; $("sCoins").value = P.autoCoins ? "auto" : "manual"; $("sSyms").value = P.symbols.join(", "); $("sTurn").value = P.minTurnoverM;
+}
+fillSettings();
+$("sSave").onclick = () => {
+  const n = (id) => Number(String($(id).value).replace(",", "."));
+  const o = { margin: n("sMargin"), leverage: n("sLev"), maxPositions: n("sMax"), tpPct: n("sTp"), slPct: n("sSl"), scoreIn: n("sScore"), minTurnoverM: n("sTurn"), autoCoins: $("sCoins").value === "auto" };
+  if ($("sCoins").value === "manual") o.symbols = $("sSyms").value.split(/[\s,;]+/).filter(Boolean).map(s => s.toUpperCase().endsWith("USDT") ? s.toUpperCase() : s.toUpperCase() + "USDT");
+  const ch = SS.setParams(o);
+  $("sOut").textContent = ch.length ? "Збережено: " + ch.join(", ") : "Без змін"; fillSettings();
+};
+$("opt").onclick = () => {
+  const r = SS.optimizeNow();
+  $("optOut").textContent = !r ? "Ще немає угод із записаною траєкторією" : !r.best ? `З ${r.n} угод прибуткової пари не знайдено` :
+    r.applied ? `Застосовано: тейк ${r.best.tp}% / стоп ${r.best.sl}% (PF ${r.cur.pf} → ${r.best.pf})` : r.n < 30 ? `Найкраще з ${r.n} угод: тейк ${r.best.tp}% / стоп ${r.best.sl}%, застосую після 30 угод` : "Поточні тейк і стоп уже найкращі";
+  paint();
+};
+
+// ---- view ----
+function paint() {
+  const X = SS.view(), P = X.params, S = X.stats || {}, on = !!P.on;
+  $("dot").className = "dot" + (on ? " on" : "");
+  $("status").textContent = on ? (P.style === "pressure" ? "Торгую тиском стакану" : "Торгую потоком ордерів") : "Зупинено";
+  $("status2").textContent = (X.ws ? "дані стакану наживо ✓" : "підключаюсь до біржі…") + ` · тейк ${P.tpPct}% / стоп ${P.slPct}% · до ${P.maxPositions} угод · маржа ${P.margin} USDT × x${P.leverage}`;
+  const m = $("main"); m.textContent = on ? "■ Зупинити" : "▶ Запустити"; m.className = "big " + (on ? "stop" : "go");
+  document.querySelectorAll("[data-style]").forEach(b => b.classList.toggle("on", b.dataset.style === P.style));
+  $("styleHint").textContent = P.style === "pressure" ? "Бік, де стакан важчий 2 с, і довша черга на найкращій ціні; короткий тейк, вихід одразу, коли тиск зник." : "Стакан + стрічка + айсберги, поглинання, спуфінг, імпульс; тейк іде за імпульсом.";
+  const MD = X.mode || {};
+  document.querySelectorAll("[data-inv]").forEach(b => b.classList.toggle("on", b.dataset.inv === P.invert));
+  $("invHint").innerHTML = (MD.inverted ? '<b style="color:#f59e0b">Зараз усе навпаки: сигнал Buy → Sell, Sell → Buy</b>' : "Зараз звичайний напрямок")
+    + (P.invert === "auto" ? ` · авто: перевертає, якщо ${P.invertMin} угод режиму в мінусі` : "")
+    + (MD.normal ? ` · звичайний ${MD.normal.n} уг. ${f(MD.normal.pnl, 3)} · навпаки ${MD.inv.n} уг. ${f(MD.inv.pnl, 3)}` : "");
+  const w = [];
+  if (!KEYS.key) w.push("Впишіть ключі Bybit вгорі й натисніть «Перевірити»");
+  if (ACC.err) w.push("Bybit: " + ACC.err);
+  if (X.noMoney) w.push("⏸ " + X.noMoney);
+  if (X.err && !/WebSocket/.test(X.err)) w.push(X.err);
+  if (MD.pausedUntil > Date.now()) w.push("Пауза до " + new Date(MD.pausedUntil).toLocaleTimeString() + ": обидва напрямки в мінусі");
+  $("warn").innerHTML = w.map(x => `<div class="note">${esc(x)}</div>`).join("");
+  $("keysCard").style.display = on && KEYS.key && !ACC.err ? "none" : "";
+  $("eq").textContent = f(ACC.equity);
+  $("day").innerHTML = `<span class="${S.dayPnl >= 0 ? "up" : "down"}">${S.dayPnl >= 0 ? "+" : ""}${f(S.dayPnl, 3)}</span> · ${S.day || 0} уг.`;
+  $("all").textContent = (S.n || 0) + (S.win != null ? " · " + S.win + "%" : "");
+  const L = X.learn || {};
+  $("pnl").innerHTML = `<span class="${S.pnl >= 0 ? "up" : "down"}">${S.pnl >= 0 ? "+" : ""}${f(S.pnl, 3)}</span> · ${L.pf != null ? L.pf : "—"}`;
+  $("coinsLine").textContent = P.autoCoins ? "· топ волатильності: " + ((X.vol || []).slice(0, P.coinCount).map(v => `${v.sym} ${v.rng1h}%/год`).join(", ") || P.symbols.join(", ")) : "· " + P.symbols.join(", ");
+  $("live").innerHTML = (X.live || []).map(l => {
+    const sg = [l.iceBid ? "айсберг↑" : "", l.iceAsk ? "айсберг↓" : "", l.absBull ? "поглин.↑" : "", l.absBear ? "поглин.↓" : "", l.spoofBid ? "спуф bid" : "", l.spoofAsk ? "спуф ask" : ""].filter(Boolean).join(" ");
+    return `<tr><td><b>${esc(l.sym)}</b></td><td>${l.press ? l.press.lvl + " · " + l.press.que : "—"}</td><td class="${l.imb >= 0.5 ? "up" : "down"}">${l.imb ?? "—"}</td><td class="${l.delta >= 0 ? "up" : "down"}">${l.delta ?? "—"}</td><td>${l.burst != null ? "×" + l.burst : "—"}</td><td>${sg || '<span class="mute">—</span>'}</td><td class="${l.long >= P.scoreIn ? "up" : ""}">${l.long ?? "—"}</td><td class="${l.short >= P.scoreIn ? "down" : ""}">${l.short ?? "—"}</td><td class="mute">${esc(l.why || "")}</td></tr>`;
+  }).join("") || '<tr><td colspan="9" class="mute">Чекаю дані стакану…</td></tr>';
+  $("open").innerHTML = (X.open || []).map(o => `<tr><td><b>${esc(o.sym)}</b> <span class="${o.side === "Buy" ? "up" : "down"}">${o.side === "Buy" ? "лонг" : "шорт"}</span></td><td>${o.state === "entry" ? "чекає виконання ліміту" : "в угоді"}</td><td>${esc(o.entry)}</td><td>${esc(o.tp || "—")}</td><td>${esc(o.sl || "—")}</td><td>${o.sec}</td></tr>`).join("") || '<tr><td colspan="6" class="mute">Відкритих угод немає</td></tr>';
+  const OP = L.opt;
+  $("learn").innerHTML = `Фільтр схожих угод: ${L.on ? (L.ready ? `<span class="up">працює</span>, пропущено поганих сигналів ${L.skipped}` : `навчається (${L.have} з ${L.need} угод)`) : "вимкнено"} · траєкторій для оптимізатора: ${L.paths || 0}`
+    + (OP && OP.best ? `<br>Оптимізатор (${OP.n} угод): зараз тейк ${OP.cur.tp}% / стоп ${OP.cur.sl}% → на угоду ${OP.cur.avg}%, win ${OP.cur.win}%, PF ${OP.cur.pf} · найкраще <b class="up">тейк ${OP.best.tp}% / стоп ${OP.best.sl}%</b> → ${OP.best.avg}%, win ${OP.best.win}%, PF ${OP.best.pf}${OP.applied ? ' · <span class="up">застосовано</span>' : ""}`
+      : "<br>Оптимізатор запуститься після 30 угод (далі кожні 15 угод)");
+  $("trades").innerHTML = (X.trades || []).map(t => `<div>${new Date(t.closedAt).toLocaleTimeString()} · ${esc(t.sym)} ${t.side === "Buy" ? "лонг" : "шорт"}${t.inv ? " (навпаки)" : ""} · ${esc(t.how)} · <span class="${t.pnl >= 0 ? "up" : "down"}">${t.pnl >= 0 ? "+" : ""}${t.pnl}</span> · ${t.holdSec} с</div>`).join("") || '<div>Ще немає</div>';
+}
+paint();
+wSetInterval(paint, 1000);
+</script>
+</body>
+</html>
