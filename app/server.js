@@ -102,6 +102,14 @@ async function refreshAccount() {
     const r = await ev(`bx("/v5/account/wallet-balance", { query: { accountType: "UNIFIED" }, auth: true })`);
     const a = ((r && r.list) || [])[0] || {};
     Object.assign(ACC, { equity: Number(a.totalEquity || 0), available: Number(a.totalAvailableBalance || 0), error: "", at: Date.now() });
+    // equity curve for the progress chart: one point every 10 minutes, ~3 weeks kept
+    try {
+      const eq = JSON.parse(W.localStorage.getItem("bx.eq") || "[]");
+      if (ACC.equity > 0 && (!eq.length || Date.now() - eq[eq.length - 1][0] >= 10 * 60000)) {
+        eq.push([Date.now(), +ACC.equity.toFixed(4)]);
+        W.localStorage.setItem("bx.eq", JSON.stringify(eq.slice(-3000)));
+      }
+    } catch {}
     NET.ok = true; NET.text = `Bybit ${ENV}: зв'язок є`;
   } catch (e) {
     const m = String(e && e.message || e);
@@ -125,12 +133,29 @@ const lsGet = (k, d) => { try { const v = W.localStorage.getItem("bx." + k); ret
 const lsSet = (k, v) => { try { W.localStorage.setItem("bx." + k, JSON.stringify(v)); } catch {} };
 const AI = Object.assign({ on: false, last: 0, busy: false, history: [], error: "", maxLev: null, maxMargin: null }, lsGet("ai", {}));
 AI.busy = false;
-const saveAI = () => lsSet("ai", { on: AI.on, last: AI.last, history: AI.history.slice(-30), error: AI.error, maxLev: AI.maxLev, maxMargin: AI.maxMargin });
+const saveAI = () => lsSet("ai", { on: AI.on, last: AI.last, history: AI.history.slice(-300), error: AI.error, maxLev: AI.maxLev, maxMargin: AI.maxMargin });
+// progress data for the chart: equity curve (downsampled), every AI decision with the result of its period
+function progress() {
+  let eq = []; try { eq = JSON.parse(W.localStorage.getItem("bx.eq") || "[]"); } catch {}
+  const step = Math.max(1, Math.ceil(eq.length / 400));
+  const pts = eq.filter((_, i) => i % step === 0 || i === eq.length - 1);
+  const dec = AI.history.slice(-200).map(h => ({ at: h.at, mode: h.mode, pnl: h.periodPnl ?? null, trades: h.periodTrades ?? null, wins: h.periodWins ?? null, open: !h.closed }));
+  const done = dec.filter(x => x.pnl != null);
+  const last10 = done.slice(-10);
+  const prev10 = done.slice(-20, -10);
+  const avg = (a) => a.length ? a.reduce((x, y) => x + y.pnl, 0) / a.length : null;
+  return { eq: pts, dec, quality: last10.length ? Math.round(last10.filter(x => x.pnl > 0).length / last10.length * 100) : null,
+    avgLast: avg(last10), avgPrev: avg(prev10), periods: done.length, totalPnl: +done.reduce((a, x) => a + x.pnl, 0).toFixed(4) };
+}
 const LIMITS = {                       // the AI can never go outside these
   tpPct: [0.2, 5], slPct: [0.3, 5], tpR: [0.5, 10], chaseAt: [0.3, 0.95], chaseGap: [0.1, 1], chaseStep: [0.1, 3],
   squeeze: [10, 80], maxEr: [0.2, 0.8], minWidth: [0.2, 5], maxWidth: [0.5, 15], scanMin: [1, 30], refreshMin: [1, 30],
   beR: [0, 5], expiryH: [0.5, 24], cooldownMin: [5, 600],
+  maxSetups: [1, 30], rocketScore: [20, 95], rocketTpR: [1, 20], tf: [1, 60], lookback: [12, 120], coins: [20, 300],
+  minTurnover: [1, 1000], trailR: [0, 10], nowLadder: [0, 10],
 };
+const INT_KEYS = new Set(["scanMin", "refreshMin", "cooldownMin", "maxSetups", "rocketScore", "tf", "lookback", "coins", "nowLadder"]);
+const TF_OK = [1, 3, 5, 15, 30, 60];
 const engineLog = (t, cls) => { try { W.eval(`log(${JSON.stringify(t)}, ${JSON.stringify(cls || "gold-t")})`); } catch {} };
 
 async function marketContext() {
@@ -148,6 +173,19 @@ async function marketContext() {
       out.btc.avgHourlyMovePct = +(rows.reduce((a, r) => a + (r.h - r.l) / r.c, 0) / rows.length * 100).toFixed(2);
     }
   } catch (e) { out.btcError = String(e && e.message || e); }
+  try {
+    const all = ((await ev(`bx("/v5/market/tickers", { query: { category: "linear" } })`)).list || [])
+      .filter(t => /USDT$/.test(t.symbol) && Number(t.turnover24h) > 5e6)
+      .map(t => ({ symbol: t.symbol, ch24: +(Number(t.price24hPcnt) * 100).toFixed(2), turnoverM: Math.round(Number(t.turnover24h) / 1e6), funding: Number(t.fundingRate) }));
+    const by = (f) => all.slice().sort(f);
+    out.market = {
+      coins: all.length,
+      share_up_pct: all.length ? Math.round(all.filter(t => t.ch24 > 0).length / all.length * 100) : null,
+      top_volume: by((a, b) => b.turnoverM - a.turnoverM).slice(0, 12),
+      top_gainers: by((a, b) => b.ch24 - a.ch24).slice(0, 6),
+      top_losers: by((a, b) => a.ch24 - b.ch24).slice(0, 6),
+    };
+  } catch (e) { out.marketError = String(e && e.message || e); }
   return out;
 }
 
@@ -162,7 +200,8 @@ function botContext() {
       return { symbol: p.symbol, side: p.side, entry: e, mark: m, movePct: +(((m - e) / e) * 100 * (p.side === "Buy" ? 1 : -1)).toFixed(2),
         pnlUsdt: +Number(p.unrealisedPnl || 0).toFixed(4), stop: Number(p.stopLoss) || null, take: Number(p.takeProfit) || null,
         minutesOpen: s.openedAt ? Math.round((Date.now() - s.openedAt) / 60000) : null, impulseSteps: s.chaseN || 0 }; }),
-    waitingSetups: SETUPS.filter(s => s.state === "armed").length,
+    waitingSetups: SETUPS.filter(s => s.state === "armed").map(s => ({ symbol: s.symbol, kind: s.kind, buyStop: s.buy && Number(s.buy.trigger), sellStop: s.sell && Number(s.sell.trigger), widthPct: +Number(s.width || 0).toFixed(2), minutesWaiting: Math.round((Date.now() - s.createdAt) / 60000) })).slice(0, 30),
+    extra: { maxSetups: CFG.maxSetups, maxMode: CFG.maxMode, rocketScore: CFG.rocketScore, rocketTpR: CFG.rocketTpR, lookback: CFG.lookback, coins: CFG.coins, minTurnover: CFG.minTurnover, trailR: CFG.trailR, nowLadder: CFG.nowLadder },
     rockets: ROCKETS.slice(0, 6).map(r => ({ symbol: r.symbol, score: r.score, why: (r.reasons || []).slice(0, 3) })),
     lastTrades: JOURNAL.filter(j => !j.noTrade).slice(-25).map(j => ({ symbol: j.symbol, side: j.side, r: +Number(j.r || 0).toFixed(2), pnl: +Number(j.pnl || 0).toFixed(4), why: j.result || j.reason || "", kind: j.kind || "" })),
   })`) || "{}");
@@ -236,7 +275,19 @@ function optimizeNow(source) {
 const AUTO_OPT = () => !!lsGet("autoOpt", false);
 setInterval(() => { if (AUTO_OPT() && !AI.on && Date.now() - lsGet("optLast", 0) >= 24 * 3600e3) { try { optimizeNow("авто раз на добу"); dumpStorage(); } catch (e) { log("optimize:", e.message); } } }, 10 * 60000);
 
-const SYSTEM = `You are the risk-aware autopilot of a Bybit USDT-perpetual breakout bot. Every few minutes you receive the market state,
+const SYSTEM_FULL = `You have FULL control of this trading bot. The owner gave you the steering wheel 100%: there is no human in the loop.
+Your only job is to grow the account. Your results are measured every period: "yourTrackRecord" lists your previous decisions and the
+profit/loss the bot made in the period after each of them, and "performance" shows which settings made or lost money. Learn from it:
+repeat what worked, stop what lost money, and say what you learned in "lesson". If your periods keep losing, the owner will switch you off,
+so do everything possible to make each period profitable: choose the style, tune every setting, open trades yourself when you see a clear
+setup, cancel waiting orders that no longer make sense, close positions that should be closed, or pause new entries when the market is bad.
+Extra actions you may use:
+ "open":[{"symbol":"SOLUSDT","side":"Buy|Sell","why":"..."}]  (max 3, enters now with a limit order, stop and take are set automatically)
+ "cancel":["SYMBOL"]  (remove waiting breakout orders)
+ settings may also contain: maxSetups, maxMode ("balance"|"fixed"), rocketScore, rocketTpR, tf (1,3,5,15,30,60), lookback, coins, minTurnover, trailR, nowLadder, margin.
+Add "lesson": one sentence in Ukrainian about what you learned from your track record.
+`;
+const SYSTEM = SYSTEM_FULL + `You are the risk-aware autopilot of a Bybit USDT-perpetual breakout bot. Every few minutes you receive the market state,
 the bot's settings, open positions and the last closed trades, and you decide how the bot should trade for the next period.
 The bot places Buy Stop above and Sell Stop below squeezed ranges; "scalp" = 5-minute ranges with a fixed take/stop in % of the entry;
 "breakout" = 15-minute ranges with take in R (multiples of the risk). The impulse trailing (chase) moves the stop behind the price and pushes
@@ -281,6 +332,14 @@ async function applyDecision(d) {
   for (const [k, v] of Object.entries(d.settings || {})) {
     const n = Number(v);
     if (!Number.isFinite(n)) continue;
+    if (k === "maxMode") continue;
+    if (k === "margin") {
+      const cap = Number(process.env.AI_MAX_MARGIN) || AI.maxMargin || cur.margin;   // the AI never risks more per trade than this
+      const m = Math.max(1, Math.min(cap, +n.toFixed(2)));
+      if (m !== cur.margin) set.margin = m;
+      continue;
+    }
+    if (k === "tf") { const tf = TF_OK.reduce((a, b) => Math.abs(b - n) < Math.abs(a - n) ? b : a, 5); if (tf !== cur.tf) set.tf = tf; continue; }
     if (k === "leverage") {
       const cap = AI.maxLev || cur.leverage;
       const lev = Math.max(1, Math.min(cap, Math.round(n)));
@@ -288,9 +347,10 @@ async function applyDecision(d) {
       continue;
     }
     if (!LIMITS[k]) continue;
-    const val = Math.min(LIMITS[k][1], Math.max(LIMITS[k][0], k === "scanMin" || k === "refreshMin" || k === "cooldownMin" ? Math.round(n) : +n.toFixed(3)));
+    const val = Math.min(LIMITS[k][1], Math.max(LIMITS[k][0], INT_KEYS.has(k) ? Math.round(n) : +n.toFixed(3)));
     if (val !== cur[k]) set[k] = val;
   }
+  if (d.settings && ["balance", "fixed"].includes(d.settings.maxMode) && d.settings.maxMode !== cur.maxMode) set.maxMode = d.settings.maxMode;
   const fresh = JSON.parse(ev("JSON.stringify(CFG)"));
   if (fresh.scalp && set.tpPct != null) set.tpPct = Math.max(0.3, set.tpPct);
   if (Object.keys(set).length) {
@@ -307,7 +367,39 @@ async function applyDecision(d) {
       changes.push(`закрито ${p.symbol}`);
     } catch (e) { changes.push(`не закрив ${p.symbol}: ${e.message}`); }
   }
+  // cancel waiting breakout orders the AI no longer wants
+  for (const sym of (Array.isArray(d.cancel) ? d.cancel : []).slice(0, 30)) {
+    const S = String(sym).toUpperCase();
+    try {
+      const done = await ev(`(async () => { const s = SETUPS.find(x => x.symbol === ${JSON.stringify(S)} && x.state === "armed"); if (!s) return false;
+        await cancelAll(s); await cancelDip(s); SETUPS = SETUPS.filter(x => x !== s); saveSetups(); return true; })()`);
+      if (done) changes.push(`знято заявки ${S}`);
+    } catch (e) { changes.push(`не зняв ${S}: ${e.message}`); }
+  }
+  // trades the AI opens itself (stop and take are set by the bot)
+  if (!ev("CFG.aiPause")) {
+    for (const o of (Array.isArray(d.open) ? d.open : []).slice(0, 3)) {
+      const sym = String(o && o.symbol || "").toUpperCase(), side = o && /sell|short/i.test(o.side) ? "Sell" : "Buy";
+      if (!/^[A-Z0-9]{2,30}USDT$/.test(sym)) continue;
+      try {
+        await ev(`enterNow(${JSON.stringify(sym)}, ${JSON.stringify(side)}, { score: null, reasons: [${JSON.stringify("AI: " + String(o.why || "").slice(0, 120))}] }, { kind: "ai" })`);
+        changes.push(`AI відкрив ${side === "Buy" ? "лонг" : "шорт"} ${sym}`);
+      } catch (e) { changes.push(`не відкрив ${sym}: ${e.message}`); }
+    }
+  }
   return changes;
+}
+
+// result of the period after the last AI decision: closed trades and equity change until now
+function closePeriod() {
+  const h = AI.history[AI.history.length - 1];
+  if (!h || h.closed) return;
+  const trades = JSON.parse(ev(`JSON.stringify(JOURNAL.filter(j => !j.noTrade && j.closedAt >= ${h.at}).map(j => j.pnl))`) || "[]");
+  h.periodPnl = +trades.reduce((a, x) => a + Number(x || 0), 0).toFixed(4);
+  h.periodTrades = trades.length;
+  h.periodWins = trades.filter(x => x > 0).length;
+  if (h.equity && ACC.equity) h.periodEquity = +(ACC.equity - h.equity).toFixed(4);
+  h.closed = true;
 }
 
 async function aiTick(force) {
@@ -316,10 +408,16 @@ async function aiTick(force) {
   if (!FAL_KEY) { AI.error = "немає FAL_KEY у Railway → Variables"; return; }
   AI.busy = true; AI.last = Date.now();
   try {
-    const ctx = Object.assign({ time: new Date().toISOString() }, await marketContext(), botContext(), { performance: perf() });
+    closePeriod();
+    const ctx = Object.assign({ time: new Date().toISOString() }, await marketContext(), botContext(), {
+      performance: perf(),
+      account: { equity: ACC.equity, available: ACC.available },
+      yourTrackRecord: AI.history.slice(-12).map(h => ({ at: new Date(h.at).toISOString(), mode: h.mode, regime: h.regime, changes: h.changes, lesson: h.lesson || "",
+        periodPnlUsdt: h.periodPnl ?? null, periodTrades: h.periodTrades ?? null, periodWins: h.periodWins ?? null, equityAtDecision: h.equity ?? null })),
+    });
     const d = await askAI(ctx);
     const changes = await applyDecision(d);
-    const item = { at: Date.now(), regime: d.regime || "", mode: d.mode || "", reason: String(d.reason || "").slice(0, 400), changes };
+    const item = { at: Date.now(), regime: d.regime || "", mode: d.mode || "", reason: String(d.reason || "").slice(0, 400), lesson: String(d.lesson || "").slice(0, 300), changes, equity: ACC.equity };
     AI.history.push(item); AI.error = "";
     engineLog(`🧠 AI: ${item.regime} · ${item.mode} — ${item.reason}${changes.length ? " · зміни: " + changes.join("; ") : " · без змін"}`);
     log("AI decision", JSON.stringify(item));
@@ -349,7 +447,7 @@ function state() {
     ai: { on: AI.on, busy: AI.busy, key: !!FAL_KEY, model: FAL_MODEL, every: AI_EVERY, error: AI.error, maxLev: AI.maxLev,
       next: AI.on ? Math.max(0, Math.round((AI.last + AI_EVERY * 60000 - Date.now()) / 1000)) : null, history: AI.history.slice(-5).reverse() },
     aiPause: !!ev("CFG.aiPause"),
-    perf: perf(), autoOpt: AUTO_OPT(),
+    perf: perf(), autoOpt: AUTO_OPT(), progress: progress(),
     lastBybitSec: ACT.last ? Math.round((Date.now() - ACT.last) / 1000) : -1, upMin: Math.round((Date.now() - ACT.started) / 60000),
     stats: {
       all: tr.length, pnl: tr.reduce((a, t) => a + t.pnl, 0), win: tr.length ? Math.round(tr.filter(t => t.pnl > 0).length / tr.length * 100) : null,
@@ -372,6 +470,7 @@ async function act(what) {
     if (AI.on) {
       AI.last = Date.now();   // the timer waits; the first decision is made right below, once the bot runs
       AI.maxLev = Number(process.env.AI_MAX_LEVERAGE) || ev("CFG.leverage");   // the AI never raises leverage above this
+      AI.maxMargin = Number(process.env.AI_MAX_MARGIN) || ev("CFG.margin");     // nor the margin per trade
       if (!ev("RUN") || !ev("CFG.autopilot")) { if (!ev("CFG.autopilot")) click("btn-auto"); else click("btn-start"); }
       await new Promise(r => setTimeout(r, 2500));
       if (!ev("RUN")) { AI.on = false; saveAI(); return "Бот не запустився: " + (ev(`document.getElementById("note-err").textContent`) || "перевірте ключі Bybit"); }
@@ -435,6 +534,9 @@ table{width:100%;border-collapse:collapse;font-size:13px}td,th{padding:6px 4px;b
 <div class="card"><div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap"><b>📈 Що приносить прибуток</b>
 <span><button class="mini" id="opt">Застосувати найприбутковіші</button> <button class="mini" id="autoopt">Авто раз на добу</button></span></div>
 <div class="mute" id="perfSum" style="font-size:13px;margin-top:6px"></div><div id="perfRows" style="margin-top:6px"></div></div>
+<div class="card"><b>🧠 Прогрес AI</b><div class="mute" id="progSum" style="font-size:13px;margin-top:4px"></div>
+<div style="font-size:12px;margin-top:8px" class="mute">Капітал, USDT · фіолетові лінії — рішення AI</div><svg id="eqChart" viewBox="0 0 600 180" style="width:100%;height:180px;display:block"></svg>
+<div style="font-size:12px;margin-top:8px" class="mute">Результат кожного періоду після рішення AI (USDT) · лінія — накопичено</div><svg id="decChart" viewBox="0 0 600 150" style="width:100%;height:150px;display:block"></svg></div>
 <div class="card" id="aiCard" style="display:none"><b>🧠 Рішення AI</b><div id="aiHist" class="log"></div></div>
 <div class="card"><b>Що робить бот</b><div class="log" id="log"></div></div>
 <div class="mute" style="font-size:12px;margin:14px 0" id="foot"></div>
@@ -452,12 +554,13 @@ const A=S.ai||{};const ab=$("ai");ab.className="big ai"+(A.on?" on":"");ab.disab
 ab.textContent=A.on?(A.busy?"🧠 AI думає…":"🧠 AI-автопілот увімкнено"):"🧠 AI-автопілот";
 $("aiLine").innerHTML=!A.key?'<span class="down">Для AI додайте FAL_KEY у Railway → Variables</span>':A.on?'<span style="color:#c4b5fd">Модель '+esc(A.model)+" · наступне рішення через "+Math.round((A.next||0)/60)+" хв"+(S.aiPause?' · <b>нові входи на паузі (рішення AI)</b>':"")+(A.maxLev?" · плече не вище x"+A.maxLev:"")+"</span>"+(A.error?'<br><span class="down">'+esc(A.error)+"</span>":""):'<span class="mute">AI кожні '+A.every+" хв аналізує ринок, рахунок і угоди та сам міняє стиль (скальпінг / пробої / пауза), тейк, стоп, трейлінг і фільтри</span>";
 $("aiCard").style.display=(A.history||[]).length?"":"none";
-$("aiHist").innerHTML=(A.history||[]).map(h=>"<div>"+new Date(h.at).toLocaleTimeString()+' · <b style="color:#c4b5fd">'+esc(h.regime)+" · "+esc(h.mode)+"</b> — "+esc(h.reason)+(h.changes&&h.changes.length?'<br><span class="up">'+esc(h.changes.join("; "))+"</span>":"")+"</div>").join("");
+$("aiHist").innerHTML=(A.history||[]).map(h=>"<div>"+new Date(h.at).toLocaleTimeString()+' · <b style="color:#c4b5fd">'+esc(h.regime)+" · "+esc(h.mode)+"</b> — "+esc(h.reason)+(h.lesson?'<br><span style="color:#c4b5fd">Урок: '+esc(h.lesson)+"</span>":"")+(h.changes&&h.changes.length?'<br><span class="up">'+esc(h.changes.join("; "))+"</span>":"")+"</div>").join("");
 $("scalpHint").textContent="Скальпінг: короткі угоди, тейк +"+(S.scalp?S.tp:0.5)+"%, стоп −"+(S.scalp?S.sl:1)+"% від входу, скан щохвилини.";
 const P=S.perf||{};
 $("perfSum").innerHTML=P.total?("Угод "+P.total+" · win "+P.win+"% · PnL "+(P.pnl>=0?'<span class="up">+':'<span class="down">')+f(P.pnl,4)+"</span> USDT"+(P.profitFactor!=null?" · PF "+P.profitFactor:"")+(P.avgWinMovePct!=null?" · середній виграш +"+P.avgWinMovePct+"%":"")+(P.avgImpulseMaxPct!=null?" · середній імпульс +"+P.avgImpulseMaxPct+"%":"")+" · з налаштуваннями "+P.withSettings+" (для висновку треба "+P.minTrades+"+ угод з одним значенням)"):"Ще немає закритих угод — статистика з'явиться після перших угод.";
 $("perfRows").innerHTML=(P.params||[]).filter(p=>p.rows.length).map(p=>'<div style="margin-top:6px;font-size:13px"><b>'+esc(p.name)+"</b>"+(p.best?' · <span class="up">найкраще '+esc(p.best.value)+"</span>":"")+"<br>"+p.rows.map(r=>'<span class="chip '+(r.avgRoi>=0?"up":"down")+'">'+esc(r.value)+": "+(r.avgRoi>=0?"+":"")+r.avgRoi+"% · "+r.n+" уг. · "+r.win+"%</span>").join("")+"</div>").join("")+((P.byExit||[]).length?'<div style="margin-top:6px;font-size:13px"><b>Чим закрились</b><br>'+P.byExit.map(r=>'<span class="chip '+(r.pnl>=0?"up":"down")+'">'+esc(r.value)+": "+r.n+" · "+(r.pnl>=0?"+":"")+r.pnl+"</span>").join("")+"</div>":"")+((P.byHour||[]).length?'<div style="margin-top:6px;font-size:13px"><b>Години</b><br>'+P.byHour.map(r=>'<span class="chip '+(r.pnl>=0?"up":"down")+'">'+esc(r.value)+": "+r.n+" · "+(r.pnl>=0?"+":"")+r.pnl+"</span>").join("")+"</div>":"");
 $("autoopt").className="mini"+(S.autoOpt?" on":"");$("autoopt").textContent=S.autoOpt?"Авто раз на добу: увімк":"Авто раз на добу";
+drawProgress(S.progress||{});
 $("chaseLine").innerHTML=S.chase?'<span class="up">🚀 Трейлінг стопа і тейку увімкнено</span> <span class="mute">— після '+Math.round(S.chaseAt*100)+"% шляху до тейку стоп іде за ціною, а тейк відсувається далі в бік руху, щоб забрати весь імпульс</span>":'<span class="mute">Трейлінг стопа і тейку вимкнено</span>';
 $("warn").innerHTML=w.map(x=>'<div class="note warn">'+esc(x)+"</div>").join("");
 $("eq").textContent=f(S.acc.equity);$("av").textContent=f(S.acc.available);
@@ -470,6 +573,24 @@ $("foot").textContent=S.env+" · "+S.net.text+" · останній запит �
 async function act(what,q){if(q&&!confirm(q))return;busy=true;paint();try{const r=await fetch("/api/"+what,{method:"POST"}).then(r=>r.json());if(r.text&&r.text!=="OK")alert(r.text)}catch(e){alert("Немає зв'язку з сервером")}busy=false;await load()}
 $("main").onclick=()=>{const on=S&&S.run&&S.auto;on?act("stop","Зупинити бота? Заявки бота, що чекають пробою, буде знято. Відкриті позиції лишаться зі своїм стопом і тейком."):act("start",S&&S.env==="mainnet"?"Запустити торгівлю на реальному рахунку?":"")};
 $("ai").onclick=()=>act("ai",S&&S.ai&&!S.ai.on?"Увімкнути AI-автопілот? AI сам керуватиме стилем торгівлі, тейком, стопом, фільтрами і може закривати позиції. Маржу не змінює, плече не піднімає вище поточного. Прибуток не гарантовано.":"");
+function drawProgress(G){const W=600;
+const eq=G.eq||[],dec=G.dec||[];
+const q=G.quality,al=G.avgLast,ap=G.avgPrev;
+$("progSum").innerHTML=G.periods?("Періодів AI: "+G.periods+" · разом "+(G.totalPnl>=0?'<span class="up">+':'<span class="down">')+f(G.totalPnl,4)+"</span> USDT · якість останніх 10: "+(q==null?"—":'<b class="'+(q>=50?"up":"down")+'">'+q+"%</b> у плюсі")+(al!=null&&ap!=null?" · середній період "+(al>=ap?'<span class="up">покращився':'<span class="down">погіршився')+"</span> ("+f(ap,4)+" → "+f(al,4)+")":"")):"Графік наповнюватиметься: капітал записується кожні 10 хв, а кожне рішення AI отримує результат свого періоду.";
+let svg="";if(eq.length>1){const t0=eq[0][0],t1=eq[eq.length-1][0]||t0+1,vs=eq.map(p=>p[1]),lo=Math.min(...vs),hi=Math.max(...vs),pad=(hi-lo)*0.1||1;
+const X=t=>10+(t-t0)/(t1-t0||1)*(W-20),Y=v=>170-(v-(lo-pad))/((hi+pad)-(lo-pad))*160;
+dec.forEach(d=>{if(d.at>=t0&&d.at<=t1)svg+='<line x1="'+X(d.at)+'" x2="'+X(d.at)+'" y1="5" y2="172" stroke="#7c3aed" stroke-opacity=".45" stroke-width="1"/>'});
+svg+='<polyline fill="none" stroke="'+(vs[vs.length-1]>=vs[0]?"#0ecb81":"#f6465d")+'" stroke-width="2" points="'+eq.map(p=>X(p[0]).toFixed(1)+","+Y(p[1]).toFixed(1)).join(" ")+'"/>';
+svg+='<text x="12" y="14" fill="#848e9c" font-size="11">'+f(hi,2)+'</text><text x="12" y="168" fill="#848e9c" font-size="11">'+f(lo,2)+"</text>"}
+else svg='<text x="12" y="90" fill="#848e9c" font-size="13">Ще мало точок капіталу</text>';$("eqChart").innerHTML=svg;
+const done=dec.filter(d=>d.pnl!=null).slice(-60);let s2="";
+if(done.length){const mx=Math.max(...done.map(d=>Math.abs(d.pnl)),1e-9);let cum=0;const cums=done.map(d=>cum+=d.pnl),cm=Math.max(...cums.map(Math.abs),1e-9);
+const bw=(W-20)/done.length,mid=75;
+done.forEach((d,i)=>{const h=Math.abs(d.pnl)/mx*65;s2+='<rect x="'+(10+i*bw+1).toFixed(1)+'" y="'+(d.pnl>=0?mid-h:mid).toFixed(1)+'" width="'+Math.max(1,bw-2).toFixed(1)+'" height="'+Math.max(1,h).toFixed(1)+'" fill="'+(d.pnl>=0?"#0ecb81":"#f6465d")+'"><title>'+new Date(d.at).toLocaleString()+" · "+d.mode+" · "+(d.pnl>=0?"+":"")+d.pnl+" USDT · угод "+d.trades+"</title></rect>"});
+s2+='<line x1="10" x2="590" y1="'+mid+'" y2="'+mid+'" stroke="#2b3139"/>';
+s2+='<polyline fill="none" stroke="#c4b5fd" stroke-width="2" points="'+cums.map((c,i)=>(10+i*bw+bw/2).toFixed(1)+","+(mid-c/cm*65).toFixed(1)).join(" ")+'"/>'}
+else s2='<text x="12" y="75" fill="#848e9c" font-size="13">Перший результат з&#39;явиться після другого рішення AI</text>';
+$("decChart").innerHTML=s2;}
 $("opt").onclick=()=>act("optimize","Застосувати найприбутковіші налаштування за статистикою угод?");
 $("autoopt").onclick=()=>act("autoopt","");
 $("scalp").onclick=()=>act("scalp",S&&!S.scalp?"Увімкнути скальпінг? Тейк +0.5%, стоп −1% від входу. Діє на нові заявки.":"");
