@@ -25,6 +25,13 @@ const DEFAULTS = {
   dailyLossPct: 3,       // super scalping stops for the day after this loss, % of equity
   ride: true,            // move the take further while the impulse goes on
   useIceberg: true, useAbsorption: true, useSpoof: true,
+  // protection against the usual scalping losses
+  needAgree: true,       // book and tape must point the same way
+  cancelOnFade: true,    // pull an unfilled entry when the signal fades (avoids fills only when the price runs against us)
+  flipExit: true,        // the flow turned against the trade: leave by a limit at the best price before the stop
+  timeStopSec: 90,       // no progress in this time: leave near break-even (limit)
+  adaptive: true,        // take/stop follow the last minute's range
+  autoPrune: true,       // pause losing coins, switch off losing signal types
 };
 
 function create({ ev, log, engineLog, lsGet, lsSet, env, testWs }) {
@@ -194,8 +201,16 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs }) {
   async function onFilled(p, entryPx) {
     const long = p.side === "Buy";
     p.entry = entryPx; p.state = "open"; p.openedAt = Date.now();
-    const tp = await alignP(entryPx * (1 + (long ? 1 : -1) * P.tpPct / 100), p.tick, long);
-    const sl = await alignP(entryPx * (1 - (long ? 1 : -1) * P.slPct / 100), p.tick, !long);
+    // adaptive: scale take and stop by the last minute's range (0.25% = normal); never a take below 0.1%
+    let f = 1;
+    const m = M[p.sym];
+    if (P.adaptive && m && m.prices.length > 10) {
+      const ps = m.prices.map(x => x[1]), rng = (Math.max(...ps) - Math.min(...ps)) / entryPx * 100;
+      f = Math.max(0.6, Math.min(1.6, rng / 0.25));
+    }
+    p.tpPct = Math.max(0.1, +(P.tpPct * f).toFixed(3)); p.slPct = +(P.slPct * f).toFixed(3);
+    const tp = await alignP(entryPx * (1 + (long ? 1 : -1) * p.tpPct / 100), p.tick, long);
+    const sl = await alignP(entryPx * (1 - (long ? 1 : -1) * p.slPct / 100), p.tick, !long);
     p.tp = Number(tp); p.sl = Number(sl);
     try { await setStop(p, sl); }
     catch (e) { engineLog(`⚡⚡ ${p.sym}: стоп не поставився: ${e.message}`, "down"); }
@@ -216,7 +231,10 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs }) {
       openedAt: p.openedAt, closedAt: Date.now(), holdSec: Math.round((Date.now() - p.openedAt) / 1000), rides: p.rides || 0,
       sig: p.sig && { imb: p.sig.imb, delta: p.sig.delta, burst: p.sig.burst, ice: p.sig.iceBid || p.sig.iceAsk, abs: p.sig.absBull || p.sig.absBear, spoof: !!(p.sig.spoofBid || p.sig.spoofAsk), score: Math.max(p.sig.long, p.sig.short) },
       cfg: { tpPct: P.tpPct, slPct: P.slPct, scoreIn: P.scoreIn, burstX: P.burstX, ride: P.ride } };
+    if (p.leaving) t.how = closed === "тейк" ? `вихід: ${p.leaving}` : closed;
+    t.cfg.adaptiveTp = p.tpPct || null;
     ST.trades.push(t); ST.dayPnl += t.pnl; save();
+    if (P.autoPrune) prune(p.sym);
     engineLog(`⚡⚡ ${p.sym}: закрито (${closed}) PnL ${t.pnl >= 0 ? "+" : ""}${t.pnl} USDT за ${t.holdSec} с`, t.pnl >= 0 ? "up" : "down");
     COOL[p.sym] = Date.now() + (t.pnl < 0 ? P.cooldownSec * 2 : P.cooldownSec) * 1000;
     delete POSN[p.sym];
@@ -230,6 +248,22 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs }) {
         await cancelAll(s); await cancelDip(s); SETUPS = SETUPS.filter(x => x !== s); n++; } if (n) saveSetups(); return n; })()`);
       if (n) engineLog(`⚡⚡ Суперскальпінг забрав свої монети: знято ${n} заявок пробою на них`, "mute");
     } catch (e) { /* next time */ }
+  }
+
+  // drop what loses: a coin with a losing recent run pauses for an hour; a signal type that keeps losing is switched off
+  function prune(sym) {
+    const last = ST.trades.filter(x => x.sym === sym).slice(-8);
+    if (last.length >= 6 && last.reduce((a, x) => a + x.pnl, 0) < 0 && last.filter(x => x.pnl < 0).length >= 5) {
+      COOL[sym] = Date.now() + 3600e3;
+      engineLog(`⚡⚡ ${sym}: ${last.filter(x => x.pnl < 0).length} збиткових з ${last.length} — монета на паузі 1 год`, "down");
+    }
+    for (const [flag, key, name] of [["ice", "useIceberg", "айсберги"], ["abs", "useAbsorption", "поглинання"], ["spoof", "useSpoof", "спуфінг"]]) {
+      const ts = ST.trades.slice(-200).filter(x => x.sig && x.sig[flag]).slice(-20);
+      if (P[key] && ts.length >= 12 && ts.filter(x => x.pnl > 0).length / ts.length < 0.4 && ts.reduce((a, x) => a + x.pnl, 0) < 0) {
+        P[key] = false; save();
+        engineLog(`⚡⚡ Сигнал «${name}» збитковий (${ts.filter(x => x.pnl > 0).length}/${ts.length} у плюсі) — вимкнено`, "down");
+      }
+    }
   }
 
   // ---------------- the loop: entries every 0.5 s, our orders every 1.5 s ----------------
@@ -263,6 +297,17 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs }) {
           if (p.state === "entry") {
             if (ps) { await onFilled(p, Number(ps.avgPrice)); continue; }
             if (!live.has(p.entryId)) { delete POSN[p.sym]; continue; }     // cancelled / rejected (PostOnly crossed)
+            const mine = sig ? (p.side === "Buy" ? sig.long : sig.short) : 1;
+            if (P.cancelOnFade && sig && mine < P.scoreIn * 0.7) {
+              await cancel(p.sym, p.entryId);
+              // the order may have filled at this very moment: then the position is picked up on the next check
+              const again = await bx("/v5/position/list", { query: { category: "linear", symbol: p.sym }, auth: true });
+              const filled = (again.list || []).find(x => x.side === p.side && Number(x.size) > 0);
+              if (filled) { await onFilled(p, Number(filled.avgPrice)); continue; }
+              delete POSN[p.sym]; COOL[p.sym] = now + 10000;
+              engineLog(`⚡⚡ ${p.sym}: сигнал згас (${mine.toFixed(2)}) до виконання — вхід знято`, "mute");
+              continue;
+            }
             if (now - p.at > P.entryWaitSec * 1000) { await cancel(p.sym, p.entryId); delete POSN[p.sym]; engineLog(`⚡⚡ ${p.sym}: вхід не виконався за ${P.entryWaitSec} с — знято`, "mute"); }
             continue;
           }
@@ -271,14 +316,28 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs }) {
           const gone = (long ? px - p.entry : p.entry - px) / p.entry * 100;
           // ride the impulse: the take moves further and the stop goes to a small profit while the tape still pushes our way
           const push = sig && (long ? sig.delta > 0.3 && sig.burst >= P.burstX * 0.7 : sig.delta < -0.3 && sig.burst >= P.burstX * 0.7);
-          if (P.ride && p.tpId && gone >= P.tpPct * 0.7 && push) {
-            const ntp = await alignP(p.tp * (1 + (long ? 1 : -1) * P.tpPct / 200), p.tick, long);
+          if (P.ride && p.tpId && !p.leaving && gone >= (p.tpPct || P.tpPct) * 0.7 && push) {
+            const ntp = await alignP(p.tp * (1 + (long ? 1 : -1) * (p.tpPct || P.tpPct) / 200), p.tick, long);
             const be = await alignP(p.entry * (1 + (long ? 1 : -1) * 0.06 / 100), p.tick, long);
             try {
               await amend(p.sym, p.tpId, ntp); p.tp = Number(ntp); p.rides = (p.rides || 0) + 1;
               if (!p.beDone) { await setStop(p, be); p.beDone = true; p.sl = Number(be); }
               engineLog(`⚡⚡ ${p.sym}: імпульс триває — тейк → ${ntp}` + (p.beDone ? ", стоп у плюс" : ""), "up");
             } catch (e) { /* the take may have just filled */ }
+          }
+          // the flow turned against us: leave now with a limit at the best price on our side (maker), smaller loss than the stop
+          const against = sig ? (long ? sig.short : sig.long) : 0;
+          if (P.flipExit && !p.leaving && sig && against >= P.scoreIn && (long ? sig.delta < -0.2 : sig.delta > 0.2)) {
+            const best = long ? sig.ask : sig.bid;
+            try { await amend(p.sym, p.tpId, best); p.tp = best; p.leaving = "розворот"; engineLog(`⚡⚡ ${p.sym}: потік розвернувся проти (${against.toFixed(2)}) — виходжу лімітом ${best}`, "mute"); } catch (e) { /* filled */ }
+          }
+          // no progress for timeStopSec: leave near break-even (entry + fees) with the limit take
+          const tpPctNow = p.tpPct || P.tpPct;
+          if (!p.leaving && P.timeStopSec > 0 && now - p.openedAt > P.timeStopSec * 1000 && gone < tpPctNow * 0.3) {
+            const beP = await alignP(p.entry * (1 + (long ? 1 : -1) * 0.05 / 100), p.tick, long);
+            const best = sig ? (long ? sig.ask : sig.bid) : Number(beP);
+            const target = long ? Math.max(Number(beP), best) : Math.min(Number(beP), best);
+            try { await amend(p.sym, p.tpId, target); p.tp = target; p.leaving = "час"; engineLog(`⚡⚡ ${p.sym}: ${P.timeStopSec} с без руху — виходжу біля беззбитку ${target}`, "mute"); } catch (e) { /* filled */ }
           }
           // too long in the trade: pull the take to the best price (still a limit, maker) to get out
           if (now - p.openedAt > P.holdMaxSec * 1000 && sig && !p.pulled) {
@@ -306,7 +365,9 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs }) {
         const cands = P.symbols.map(signals).filter(Boolean)
           .filter(s => !POSN[s.sym] && !busySyms.has(s.sym) && (COOL[s.sym] || 0) < now && s.spreadTicks <= 3)
           .map(s => ({ s, side: s.long >= s.short ? "Buy" : "Sell", score: Math.max(s.long, s.short) }))
-          .filter(c => c.score >= P.scoreIn).sort((a, b) => b.score - a.score);
+          .filter(c => c.score >= P.scoreIn)
+          .filter(c => !P.needAgree || (c.side === "Buy" ? c.s.imb >= 0.55 && c.s.delta > 0.1 : c.s.imb <= 0.45 && c.s.delta < -0.1))
+          .sort((a, b) => b.score - a.score);
         for (const c of cands) {
           if (Object.keys(POSN).length >= P.maxPositions) break;
           try { await enter(c.s.sym, c.side, c.s); } catch (e) { ST.err = `${c.s.sym}: ${e.message}`; COOL[c.s.sym] = now + 30000; }
@@ -346,7 +407,7 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs }) {
 
   // ---------------- control + views ----------------
   const NUM = { margin: [1, 100000], leverage: [1, 50], tpPct: [0.06, 2], slPct: [0.1, 3], scoreIn: [0.3, 0.95], bandPct: [0.05, 1], burstX: [1.2, 10],
-    wallX: [2, 30], spoofSec: [1, 20], icebergX: [1.5, 20], entryWaitSec: [2, 60], holdMaxSec: [30, 3600], maxPositions: [1, 10], cooldownSec: [0, 3600], dailyLossPct: [0.5, 20] };
+    wallX: [2, 30], spoofSec: [1, 20], icebergX: [1.5, 20], entryWaitSec: [2, 60], holdMaxSec: [30, 3600], maxPositions: [1, 10], cooldownSec: [0, 3600], dailyLossPct: [0.5, 20], timeStopSec: [0, 3600] };
   function setParams(o, caps = {}) {
     const changed = [];
     for (const [k, v] of Object.entries(o || {})) {
@@ -358,7 +419,7 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs }) {
         n = Math.max(NUM[k][0], Math.min(hi, n));
         if (["maxPositions", "leverage", "entryWaitSec", "holdMaxSec", "cooldownSec", "spoofSec"].includes(k)) n = Math.round(n);
         if (P[k] !== n) { changed.push(`${k} ${P[k]}→${n}`); P[k] = n; }
-      } else if (["ride", "useIceberg", "useAbsorption", "useSpoof", "on"].includes(k) && typeof v === "boolean") {
+      } else if (["ride", "useIceberg", "useAbsorption", "useSpoof", "on", "needAgree", "cancelOnFade", "flipExit", "adaptive", "autoPrune"].includes(k) && typeof v === "boolean") {
         if (P[k] !== v) { changed.push(`${k} ${P[k]}→${v}`); P[k] = v; }
       } else if (k === "symbols" && Array.isArray(v)) {
         const list = [...new Set(v.map(x => String(x).toUpperCase()).filter(x => /^[A-Z0-9]{2,30}USDT$/.test(x)))].slice(0, 12);
@@ -386,7 +447,7 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs }) {
       return Object.entries(g).map(([k, a]) => ({ value: k, n: a.length, win: Math.round(a.filter(x => x.pnl > 0).length / a.length * 100), pnl: +a.reduce((s, x) => s + x.pnl, 0).toFixed(4) })); };
     return { params: P, stats: stats(), live: P.symbols.map(sym => Object.assign({ sym }, signals(sym) || {}, { why: (M[sym] || {}).why || "", peakScore10min: +Math.max(0, ...((M[sym] || {}).peak || []).map(x => x[1])).toFixed(2) })),
       bySymbol: by(t => t.sym), bySignal: [].concat(by(t => t.sig && t.sig.ice ? "iceberg" : null), by(t => t.sig && t.sig.abs ? "absorption" : null), by(t => t.sig && t.sig.spoof ? "spoof" : null)),
-      byTp: by(t => t.cfg && t.cfg.tpPct), last: ST.trades.slice(-20) };
+      byTp: by(t => t.cfg && t.cfg.tpPct), byExit: by(t => t.how), last: ST.trades.slice(-20) };
   }
   return { view, aiView, setParams, setOn, params: P, signals, _test: { M, POSN, applyBook, applyTrades } };
 }

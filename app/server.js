@@ -290,7 +290,9 @@ Super scalping (order flow): "superscalp" shows its parameters, results by symbo
 (imb = book imbalance 0..1, delta = tape buy-sell share, burst = 5 s volume vs normal, iceberg, absorption, spoof, long/short scores).
 It enters with LIMIT orders at the best price and takes a short LIMIT take; the stop is on the exchange. You control it fully:
  "superscalp":{"on":true|false,"symbols":["BTCUSDT",...up to 12 liquid coins],"params":{tpPct,slPct,scoreIn,bandPct,burstX,wallX,spoofSec,icebergX,
-   entryWaitSec,holdMaxSec,maxPositions,cooldownSec,dailyLossPct,margin,leverage,ride,useIceberg,useAbsorption,useSpoof}}
+   entryWaitSec,holdMaxSec,maxPositions,cooldownSec,dailyLossPct,margin,leverage,ride,useIceberg,useAbsorption,useSpoof,
+   needAgree,cancelOnFade,flipExit,timeStopSec,adaptive,autoPrune}}
+Use "byExit", "bySignal", "bySymbol" and "byTp" to see what loses money and fix exactly that.
 Choose the most liquid, most active coins for it; tpPct must beat maker fees (0.04% round trip).
 Each live coin has "why" (why there is no entry now) and "peakScore10min"; if super scalping is on but makes no trades for a long time,
 lower scoreIn towards the typical peak scores or pick more active coins.
