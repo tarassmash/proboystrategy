@@ -1334,7 +1334,9 @@ async function balanceSlots() {
     const a = (w.list || [])[0] || {};
     const free = Number(a.totalAvailableBalance || 0), inPos = POS.length;
     AP.free = free;
-    return Math.max(1, Math.min(30, inPos + Math.floor(free * 0.9 / Math.max(1, CFG.margin))));
+    // money kept for super scalping (window.__ssReserve) is not handed out to breakout orders
+    const usable = Math.max(0, free - (window.__ssReserve || 0));
+    return Math.max(1, Math.min(30, inPos + Math.floor(usable * 0.9 / Math.max(1, CFG.margin))));
   } catch (e) { return CFG.maxSetups; }
 }
 async function autopilotScan() {
