@@ -22,7 +22,7 @@ const DEFAULTS = {
   holdMaxSec: 300,       // after this the take is pulled to the best price to get out
   maxPositions: 2,
   cooldownSec: 60,
-  dailyLossPct: 3,       // super scalping stops for the day after this loss, % of equity
+  dailyLossPct: 0,       // 0 = no daily loss limit (owner's choice); >0 stops new entries for the day after this loss, % of equity
   ride: true,            // move the take further while the impulse goes on
   useIceberg: true, useAbsorption: true, useSpoof: true,
   // protection against the usual scalping losses
@@ -40,19 +40,25 @@ const DEFAULTS = {
   // inversion: when the statistics say the normal mode loses, trade the mirror (opposite side, take and stop swapped)
   invert: "auto",        // "off" | "on" | "auto"
   invertMin: 20,         // trades in a mode before judging it
+  // learning from own trades
+  learn: true,           // skip entries whose most similar past trades lost money (k nearest neighbours)
+  learnMin: 40,          // trades with recorded signals needed before the filter acts
+  optExits: true,        // re-tune take/stop on recorded price paths every optEvery trades
+  optEvery: 15,
 };
 
 function create({ ev, log, engineLog, lsGet, lsSet, env, testWs }) {
   let ST_PICK_NOW = false;
   const P = Object.assign({}, DEFAULTS, lsGet("ss", {}));
   if (!P.v) { if (P.scoreIn === 0.6 || P.scoreIn === 0.62) P.scoreIn = DEFAULTS.scoreIn; P.v = 2; }   // the first threshold was too strict for the live market
+  if (P.v < 4) { P.dailyLossPct = 0; P.v = 4; }                 // the owner switched the daily limit off
   if (P.v < 3) { if (!P.minTurnoverM || P.minTurnoverM < DEFAULTS.minTurnoverM) P.minTurnoverM = DEFAULTS.minTurnoverM; P.v = 3; ST_PICK_NOW = true; }
   const ST = { hedge: !!lsGet("ssHedge", false), trades: lsGet("ssTrades", []), dayStart: 0, dayPnl: 0, stoppedForDay: false, wsUp: false, lastMsg: 0, err: "" };
   const M = {};           // per symbol market state
   const POSN = {};        // our live entries/positions per symbol
   const COOL = {};
   let ws = null, pingT = null, reconnectT = null;
-  const save = () => { lsSet("ss", P); lsSet("ssTrades", ST.trades.slice(-500)); };
+  const save = () => { lsSet("ss", P); lsSet("ssTrades", ST.trades.slice(-400)); };
 
   // ---------------- market data ----------------
   function mk(sym) {
@@ -229,7 +235,7 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs }) {
     }
     // the mirror of the normal trade: take and stop swap places
     const tpBase = p.inv ? P.slPct : P.tpPct, slBase = p.inv ? P.tpPct : P.slPct;
-    p.tpPct = Math.max(0.1, +(tpBase * f).toFixed(3)); p.slPct = +(slBase * f).toFixed(3);
+    p.tpPct = Math.max(0.1, +(tpBase * f).toFixed(3)); p.slPct = +(slBase * f).toFixed(3); p.f = f;
     const tp = await alignP(entryPx * (1 + (long ? 1 : -1) * p.tpPct / 100), p.tick, long);
     const sl = await alignP(entryPx * (1 - (long ? 1 : -1) * p.slPct / 100), p.tick, !long);
     p.tp = Number(tp); p.sl = Number(sl);
@@ -251,12 +257,16 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs }) {
     const t = { sym: p.sym, side: p.side, entry: p.entry, exit: exitPx, pnl: +pnl.toFixed(4), roi: +(pnl / P.margin * 100).toFixed(2), how: closed,
       openedAt: p.openedAt, closedAt: Date.now(), holdSec: Math.round((Date.now() - p.openedAt) / 1000), rides: p.rides || 0,
       sig: p.sig && { imb: p.sig.imb, delta: p.sig.delta, burst: p.sig.burst, ice: p.sig.iceBid || p.sig.iceAsk, abs: p.sig.absBull || p.sig.absBear, spoof: !!(p.sig.spoofBid || p.sig.spoofAsk), score: Math.max(p.sig.long, p.sig.short) },
-      inv: !!p.inv, cfg: { tpPct: P.tpPct, slPct: P.slPct, scoreIn: P.scoreIn, burstX: P.burstX, ride: P.ride } };
+      inv: !!p.inv, f: p.f || 1, path: (p.path || []).slice(-600),
+      mfe: p.path && p.path.length ? Math.max(...p.path) : null, mae: p.path && p.path.length ? Math.min(...p.path) : null,
+      feat: p.sig ? feat(p.sig, p.inv ? (p.side === "Buy" ? "Sell" : "Buy") : p.side) : null,
+      cfg: { tpPct: P.tpPct, slPct: P.slPct, scoreIn: P.scoreIn, burstX: P.burstX, ride: P.ride } };
     if (p.leaving) t.how = closed === "тейк" ? `вихід: ${p.leaving}` : closed;
     t.cfg.adaptiveTp = p.tpPct || null;
     ST.trades.push(t); ST.dayPnl += t.pnl; save();
     if (P.autoPrune) prune(p.sym);
     judgeMode();
+    if (P.optExits && ST.trades.filter(x => x.path && x.path.length).length % P.optEvery === 0) optimizeExits(false);
     engineLog(`⚡⚡ ${p.sym}: закрито (${closed}) PnL ${t.pnl >= 0 ? "+" : ""}${t.pnl} USDT за ${t.holdSec} с`, t.pnl >= 0 ? "up" : "down");
     COOL[p.sym] = Date.now() + (t.pnl < 0 ? P.cooldownSec * 2 : P.cooldownSec) * 1000;
     delete POSN[p.sym];
@@ -270,6 +280,81 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs }) {
         await cancelAll(s); await cancelDip(s); SETUPS = SETUPS.filter(x => x !== s); n++; } if (n) saveSetups(); return n; })()`);
       if (n) engineLog(`⚡⚡ Суперскальпінг забрав свої монети: знято ${n} заявок пробою на них`, "mute");
     } catch (e) { /* next time */ }
+  }
+
+  // ---------------- learning ----------------
+  // features of a signal seen from the side of the trade (0..1-ish ranges)
+  function feat(sig, side) {
+    const L = side === "Buy";
+    return [
+      L ? sig.imb : 1 - sig.imb,                                   // book on our side
+      (L ? sig.delta : -sig.delta + 0) * 0.5 + 0.5,               // tape on our side
+      Math.min(1, Math.log(1 + Math.max(0, sig.burst || 0)) / 2.5), // burst
+      (L ? (sig.iceBid ? 1 : 0) - (sig.iceAsk ? 1 : 0) : (sig.iceAsk ? 1 : 0) - (sig.iceBid ? 1 : 0)) * 0.5 + 0.5,
+      (L ? (sig.absBull ? 1 : 0) - (sig.absBear ? 1 : 0) : (sig.absBear ? 1 : 0) - (sig.absBull ? 1 : 0)) * 0.5 + 0.5,
+      (L ? (sig.spoofAsk ? 1 : 0) - (sig.spoofBid ? 1 : 0) : (sig.spoofBid ? 1 : 0) - (sig.spoofAsk ? 1 : 0)) * 0.5 + 0.5,
+      Math.max(0, Math.min(1, ((L ? sig.move10 : -sig.move10) || 0) / 0.6 + 0.5)),   // move of the last 10 s
+      Math.min(1, (sig.spreadTicks || 1) / 4),
+    ];
+  }
+  // expected result (% of the trade margin) of the k most similar past trades of the same mode
+  function expect(sig, side, inv) {
+    if (!P.learn) return null;
+    const hist = ST.trades.filter(t => t.feat && !!t.inv === !!inv).slice(-400);
+    if (hist.length < P.learnMin) return null;
+    const f = feat(sig, side);
+    const k = Math.min(20, Math.floor(hist.length / 2));
+    const near = hist.map(t => ({ t, d: Math.sqrt(t.feat.reduce((a, x, i) => a + (x - f[i]) ** 2, 0)) })).sort((a, b) => a.d - b.d).slice(0, k);
+    let w = 0, v = 0;
+    for (const x of near) { const wt = 1 / (0.05 + x.d); w += wt; v += wt * (x.t.roi != null ? x.t.roi : 0); }
+    return { value: v / w, n: near.length };
+  }
+  // replay recorded price paths with another take/stop; fees: maker in, maker take out, taker stop out
+  const FEE_IN = 0.02, FEE_TP = 0.02, FEE_SL = 0.055 + 0.02;   // the stop is a market order: taker fee + ~0.02% slippage
+  function simulate(trades, tp, sl, adaptive) {
+    let sum = 0, win = 0, gp = 0, gl = 0;
+    for (const t of trades) {
+      const k = adaptive ? (t.f || 1) : 1, T = Math.max(0.1, tp * k), S = sl * k;
+      let r = null;
+      for (const x of t.path) { if (x >= T) { r = T - FEE_IN - FEE_TP; break; } if (x <= -S) { r = -S - FEE_IN - FEE_SL; break; } }
+      if (r == null) r = t.path[t.path.length - 1] - FEE_IN - FEE_TP;   // time exit with the limit near the market
+      sum += r; if (r > 0) { win++; gp += r; } else gl -= r;
+    }
+    const n = trades.length;
+    return { n, avg: n ? sum / n : 0, win: n ? win / n * 100 : 0, pf: gl > 0 ? gp / gl : (gp > 0 ? 9.99 : 0) };
+  }
+  ST.opt = lsGet("ssOpt", null);
+  function optimizeExits(force) {
+    const inv = inverted();
+    const trades = ST.trades.filter(t => t.path && t.path.length >= 3 && !!t.inv === inv).slice(-300);
+    if (trades.length < 30 && !force) return null;
+    if (!trades.length) return null;
+    // in the mirror mode the take is P.slPct and the stop is P.tpPct
+    const curTp = inv ? P.slPct : P.tpPct, curSl = inv ? P.tpPct : P.slPct;
+    const cur = simulate(trades, curTp, curSl, P.adaptive);
+    let best = null;
+    for (const adaptive of [true, false]) {
+      for (let tp = 0.08; tp <= 1.2001; tp += 0.02) {
+        for (let sl = 0.1; sl <= 1.5001; sl += 0.05) {
+          const r = simulate(trades, +tp.toFixed(2), +sl.toFixed(2), adaptive);
+          if (r.pf < 1) continue;
+          // goal: the most profit per trade; between close results the higher win rate and profit factor win
+          const goal = r.avg + r.win * 0.0005 + Math.min(r.pf, 3) * 0.002;
+          if (!best || goal > best.goal) best = Object.assign(r, { tp: +tp.toFixed(2), sl: +sl.toFixed(2), adaptive, goal });
+        }
+      }
+    }
+    const res = { at: Date.now(), n: trades.length, inv, cur: { tp: curTp, sl: curSl, adaptive: P.adaptive, avg: +cur.avg.toFixed(4), win: Math.round(cur.win), pf: +cur.pf.toFixed(2) },
+      best: best ? { tp: best.tp, sl: best.sl, adaptive: best.adaptive, avg: +best.avg.toFixed(4), win: Math.round(best.win), pf: +best.pf.toFixed(2) } : null, applied: false };
+    // apply only a clear improvement
+    if (best && best.avg > cur.avg + 0.005 && trades.length >= 30) {
+      if (inv) { P.slPct = best.tp; P.tpPct = best.sl; } else { P.tpPct = best.tp; P.slPct = best.sl; }
+      P.adaptive = best.adaptive; save(); res.applied = true;
+      engineLog(`⚡⚡ Оптимізатор (${trades.length} угод): тейк ${curTp}→${best.tp}%, стоп ${curSl}→${best.sl}%${best.adaptive !== res.cur.adaptive ? `, адаптивно ${best.adaptive ? "так" : "ні"}` : ""} · `
+        + `на угоду ${res.cur.avg}%→${res.best.avg}% · win ${res.cur.win}%→${res.best.win}% · PF ${res.cur.pf}→${res.best.pf}`, "up");
+    }
+    ST.opt = res; lsSet("ssOpt", res);
+    return res;
   }
 
   // ---------------- inversion ----------------
@@ -371,10 +456,17 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs }) {
       if (ST.day !== day) { ST.day = day; ST.dayPnl = 0; ST.stoppedForDay = false; }
       if (P.on && !ST.stoppedForDay) {
         const eq = Number(ev("(window.__eq || 0)")) || 0;
-        if (eq > 0 && ST.dayPnl <= -eq * P.dailyLossPct / 100) {
+        if (P.dailyLossPct > 0 && eq > 0 && ST.dayPnl <= -eq * P.dailyLossPct / 100) {
           ST.stoppedForDay = true;
           engineLog(`⚡⚡ Суперскальпінг: денний збиток ${ST.dayPnl.toFixed(2)} USDT ≥ ${P.dailyLossPct}% капіталу — нові входи до завтра вимкнено`, "down");
         }
+      }
+      // price path of every open trade, every 0.5 s, in % from the entry in the trade's favour (for the exit optimiser)
+      for (const p of Object.values(POSN)) {
+        if (p.state !== "open" || !M[p.sym] || !M[p.sym].last) continue;
+        const mv = (M[p.sym].last - p.entry) / p.entry * 100 * (p.side === "Buy" ? 1 : -1);
+        (p.path = p.path || []).push(Math.round(mv * 1000) / 1000);
+        if (p.path.length > 900) p.path = p.path.filter((_, i) => i % 2 === 0);   // keep it short for long trades
       }
       // manage our entries / positions
       if (Object.keys(POSN).length && now - lastPoll >= 1500) {
@@ -463,6 +555,14 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs }) {
           .filter(c => !P.needAgree || (c.side === "Buy" ? c.s.imb >= 0.55 && c.s.delta > 0.1 : c.s.imb <= 0.45 && c.s.delta < -0.1))
           .sort((a, b) => b.score - a.score);
         for (const c of cands) {
+          // learned filter: what did the most similar past setups bring? (the signal side, before any inversion)
+          const ex = expect(c.s, c.side, inverted());
+          if (ex && ex.value <= 0) {
+            ST.skipped = (ST.skipped || 0) + 1;
+            if (M[c.s.sym]) M[c.s.sym].why = `схожі угоди в мінусі (${ex.value.toFixed(3)}%, ${ex.n})`;
+            COOL[c.s.sym] = now + 5000;
+            continue;
+          }
           if (inverted()) { c.side = c.side === "Buy" ? "Sell" : "Buy"; }   // mirror: the opposite side
           if (Object.keys(POSN).length >= P.maxPositions) break;
           try { await enter(c.s.sym, c.side, c.s); }
@@ -510,7 +610,7 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs }) {
 
   // ---------------- control + views ----------------
   const NUM = { margin: [1, 100000], leverage: [1, 50], tpPct: [0.06, 2], slPct: [0.1, 3], scoreIn: [0.3, 0.95], bandPct: [0.05, 1], burstX: [1.2, 10],
-    wallX: [2, 30], spoofSec: [1, 20], icebergX: [1.5, 20], entryWaitSec: [2, 60], holdMaxSec: [30, 3600], maxPositions: [1, 10], cooldownSec: [0, 3600], dailyLossPct: [0.5, 20], timeStopSec: [0, 3600], coinCount: [1, 12], minTurnoverM: [5, 5000], pickEveryMin: [2, 120], invertMin: [10, 200] };
+    wallX: [2, 30], spoofSec: [1, 20], icebergX: [1.5, 20], entryWaitSec: [2, 60], holdMaxSec: [30, 3600], maxPositions: [1, 10], cooldownSec: [0, 3600], dailyLossPct: [0, 20], timeStopSec: [0, 3600], coinCount: [1, 12], minTurnoverM: [5, 5000], pickEveryMin: [2, 120], invertMin: [10, 200], learnMin: [20, 400], optEvery: [5, 100] };
   function setParams(o, caps = {}) {
     const changed = [];
     for (const [k, v] of Object.entries(o || {})) {
@@ -522,7 +622,7 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs }) {
         n = Math.max(NUM[k][0], Math.min(hi, n));
         if (["maxPositions", "leverage", "entryWaitSec", "holdMaxSec", "cooldownSec", "spoofSec", "coinCount", "pickEveryMin"].includes(k)) n = Math.round(n);
         if (P[k] !== n) { changed.push(`${k} ${P[k]}→${n}`); P[k] = n; }
-      } else if (["ride", "useIceberg", "useAbsorption", "useSpoof", "on", "needAgree", "cancelOnFade", "flipExit", "adaptive", "autoPrune", "autoCoins"].includes(k) && typeof v === "boolean") {
+      } else if (["ride", "useIceberg", "useAbsorption", "useSpoof", "on", "needAgree", "cancelOnFade", "flipExit", "adaptive", "autoPrune", "autoCoins", "learn", "optExits"].includes(k) && typeof v === "boolean") {
         if (P[k] !== v) { changed.push(`${k} ${P[k]}→${v}`); P[k] = v; }
       } else if (k === "invert" && ["off", "on", "auto"].includes(v)) {
         if (P[k] !== v) { changed.push(`invert ${P[k]}→${v}`); P[k] = v; }
@@ -543,7 +643,10 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs }) {
   }
   function view() {
     const per = (inv) => { const a = ST.trades.filter(t => !!t.inv === inv); return { n: a.length, pnl: +a.reduce((s, t) => s + t.pnl, 0).toFixed(4), win: a.length ? Math.round(a.filter(t => t.pnl > 0).length / a.length * 100) : null }; };
-    return { mode: { inverted: inverted(), setting: P.invert, normal: per(false), inv: per(true), judged: ST.judged, pausedUntil: ST.pausedUntil || 0 },
+    const withPath = ST.trades.filter(t => t.path && t.path.length >= 3).length, withFeat = ST.trades.filter(t => t.feat).length;
+    const pfAll = (() => { const a = ST.trades.slice(-200), gp = a.filter(t => t.pnl > 0).reduce((s, t) => s + t.pnl, 0), gl = -a.filter(t => t.pnl < 0).reduce((s, t) => s + t.pnl, 0); return gl > 0 ? +(gp / gl).toFixed(2) : null; })();
+    return { learn: { on: P.learn, ready: withFeat >= P.learnMin, have: withFeat, need: P.learnMin, skipped: ST.skipped || 0, pf: pfAll, opt: ST.opt, optOn: P.optExits, paths: withPath },
+      mode: { inverted: inverted(), setting: P.invert, normal: per(false), inv: per(true), judged: ST.judged, pausedUntil: ST.pausedUntil || 0 },
       noMoney: (ST.noMoneyUntil || 0) > Date.now() ? ST.noMoney : "", vol: ST.vol, pickedAt: ST.pickedAt || 0, params: P, ws: ST.wsUp && Date.now() - ST.lastMsg < 15000, err: ST.err, stoppedForDay: ST.stoppedForDay, stats: stats(),
       live: P.symbols.map(sym => Object.assign({ sym }, signals(sym) || {}, { why: (M[sym] || {}).why || "підключаюсь", peak10: +Math.max(0, ...((M[sym] || {}).peak || []).map(x => x[1])).toFixed(2) })), open: Object.values(POSN).map(p => ({ sym: p.sym, side: p.side, state: p.state, entry: p.entry || p.price, tp: p.tp || null, sl: p.sl || null, rides: p.rides || 0, sec: Math.round((Date.now() - (p.openedAt || p.at)) / 1000) })),
       trades: ST.trades.slice(-15).reverse() };
@@ -552,11 +655,11 @@ function create({ ev, log, engineLog, lsGet, lsSet, env, testWs }) {
     // what the AI needs: parameters, results, live signals and the last trades with the signals they were taken on
     const by = (f) => { const g = {}; for (const t of ST.trades.slice(-300)) { const k = f(t); if (k == null) continue; (g[k] = g[k] || []).push(t); }
       return Object.entries(g).map(([k, a]) => ({ value: k, n: a.length, win: Math.round(a.filter(x => x.pnl > 0).length / a.length * 100), pnl: +a.reduce((s, x) => s + x.pnl, 0).toFixed(4) })); };
-    return { inverted: inverted(), byMode: by(t => t.inv ? "inverted" : "normal"), volatilityTop: ST.vol, params: P, stats: stats(), live: P.symbols.map(sym => Object.assign({ sym }, signals(sym) || {}, { why: (M[sym] || {}).why || "", peakScore10min: +Math.max(0, ...((M[sym] || {}).peak || []).map(x => x[1])).toFixed(2) })),
+    return { optimizer: ST.opt, learnedFilter: { on: P.learn, skipped: ST.skipped || 0 }, inverted: inverted(), byMode: by(t => t.inv ? "inverted" : "normal"), volatilityTop: ST.vol, params: P, stats: stats(), live: P.symbols.map(sym => Object.assign({ sym }, signals(sym) || {}, { why: (M[sym] || {}).why || "", peakScore10min: +Math.max(0, ...((M[sym] || {}).peak || []).map(x => x[1])).toFixed(2) })),
       bySymbol: by(t => t.sym), bySignal: [].concat(by(t => t.sig && t.sig.ice ? "iceberg" : null), by(t => t.sig && t.sig.abs ? "absorption" : null), by(t => t.sig && t.sig.spoof ? "spoof" : null)),
       byTp: by(t => t.cfg && t.cfg.tpPct), byExit: by(t => t.how), last: ST.trades.slice(-20) };
   }
-  return { view, aiView, setParams, setOn, params: P, signals, _test: { M, POSN, applyBook, applyTrades, judgeMode, ST, inverted } };
+  return { optimizeNow: () => optimizeExits(true), view, aiView, setParams, setOn, params: P, signals, _test: { M, POSN, applyBook, applyTrades, judgeMode, ST, inverted, optimizeExits, expect, feat, simulate } };
 }
 
 module.exports = { create, DEFAULTS };

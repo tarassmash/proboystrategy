@@ -292,6 +292,8 @@ It enters with LIMIT orders at the best price and takes a short LIMIT take; the 
  "superscalp":{"on":true|false,"symbols":["BTCUSDT",...up to 12 liquid coins],"params":{tpPct,slPct,scoreIn,bandPct,burstX,wallX,spoofSec,icebergX,
    entryWaitSec,holdMaxSec,maxPositions,cooldownSec,dailyLossPct,margin,leverage,ride,useIceberg,useAbsorption,useSpoof,
    needAgree,cancelOnFade,flipExit,timeStopSec,adaptive,autoPrune,autoCoins,coinCount,minTurnoverM,pickEveryMin,invert ("off"|"on"|"auto"),invertMin}}
+"learn" (k-nearest-neighbour filter that skips setups whose most similar past trades lost) and "optExits" (take/stop re-tuned on
+recorded price paths, see "optimizer": current vs best avg % per trade, win rate, profit factor) work by themselves; keep them on.
 "invert": the mirror mode trades the opposite side with take and stop swapped; "auto" switches when the current mode loses
 over invertMin trades and pauses if both lose. Use "byMode" to compare normal vs inverted results.
 With autoCoins the bot itself re-picks the most volatile liquid coins ("volatilityTop": rng1h = range of the last hour, %); send "symbols" only to override.
@@ -512,6 +514,12 @@ async function act(what) {
     if (!HAS_KEYS) return "Немає ключів Bybit";
     SS.setOn(!SS.params.on);
     return "OK";
+  } else if (what === "ssopt") {
+    const r = SS.optimizeNow();
+    if (!r) return "Ще немає угод з записаною траєкторією — оптимізатор потребує угод після цього оновлення";
+    if (!r.best) return `З ${r.n} угод прибуткової пари тейк/стоп не знайдено (PF < 1 для всіх варіантів) — потрібно більше угод або інші входи`;
+    return r.applied ? `Застосовано: тейк ${r.best.tp}%, стоп ${r.best.sl}% (на угоду ${r.cur.avg}% → ${r.best.avg}%, win ${r.cur.win}% → ${r.best.win}%, PF ${r.cur.pf} → ${r.best.pf})`
+      : r.n < 30 ? `Найкраще з ${r.n} угод: тейк ${r.best.tp}%, стоп ${r.best.sl}% (PF ${r.best.pf}), але для застосування треба 30+ угод` : "Поточні тейк і стоп уже найкращі";
   } else if (what === "optimize") {
     return optimizeNow("кнопка");
   } else if (what === "autoopt") {
@@ -570,6 +578,8 @@ table{width:100%;border-collapse:collapse;font-size:13px}td,th{padding:6px 4px;b
 <div class="card" id="ssCard"><b>⚡⚡ Суперскальпінг: стакан і стрічка наживо</b><div class="mute" id="ssSum" style="font-size:13px;margin-top:4px"></div>
 <div class="scroll"><table><thead><tr><th>Монета</th><th>Стакан</th><th>Дельта</th><th>Сплеск</th><th>Сигнали</th><th>Лонг</th><th>Шорт</th><th>Макс 10 хв</th><th>Чому немає входу</th></tr></thead><tbody id="ssLive"></tbody></table></div>
 <div class="scroll" style="margin-top:8px"><table><thead><tr><th>Угода</th><th>Стан</th><th>Вхід</th><th>Тейк</th><th>Стоп</th><th>с</th></tr></thead><tbody id="ssOpen"></tbody></table></div>
+<div style="margin-top:10px;font-size:13px" id="ssLearn"></div>
+<div style="margin-top:6px"><button class="mini" id="ssOpt">Оптимізувати тейк і стоп зараз</button></div>
 <div class="log" id="ssTrades" style="margin-top:6px"></div></div>
 <div class="card"><b>🧠 Прогрес AI</b><div class="mute" id="progSum" style="font-size:13px;margin-top:4px"></div>
 <div style="font-size:12px;margin-top:8px" class="mute">Капітал, USDT · фіолетові лінії — рішення AI</div><svg id="eqChart" viewBox="0 0 600 180" style="width:100%;height:180px;display:block"></svg>
@@ -603,6 +613,11 @@ sb.textContent=XP.on?"⚡⚡ Суперскальпінг увімкнено":"�
 $("ssLine").innerHTML=(XP.on?'<span style="color:#67e8f9">':'<span class="mute">')+"Стакан, стрічка, айсберги, поглинання, спуфінг · вхід і тейк лімітками · тейк "+XP.tpPct+"% · стоп "+XP.slPct+"% · до "+XP.maxPositions+" угод · "+(X.ws?"дані наживо ✓":"підключаюсь до біржі…")+(X.stoppedForDay?' · <b class="down">денний ліміт збитку — пауза до завтра</b>':"")+(X.noMoney?'<br><b class="down">⏸ '+esc(X.noMoney)+"</b> — звільніть кошти (менше заявок основного бота або менша маржа), бот спробує знову через хвилину":"")+"</span>"+(X.err?'<br><span class="down">'+esc(X.err)+"</span>":"");
 const MD=X.mode||{};
 $("ssSum").innerHTML='<b>Режим: '+(MD.inverted?'<span style="color:#f59e0b">ІНВЕРСІЯ (торгую навпаки)</span>':"звичайний")+"</b> · налаштування "+esc(MD.setting||"")+(MD.normal?" · звичайний: "+MD.normal.n+" уг. "+f(MD.normal.pnl,3)+(MD.normal.win!=null?" ("+MD.normal.win+"%)":"")+" · інверсія: "+MD.inv.n+" уг. "+f(MD.inv.pnl,3)+(MD.inv.win!=null?" ("+MD.inv.win+"%)":""):"")+(MD.pausedUntil>Date.now()?'<br><b class="down">Пауза до '+new Date(MD.pausedUntil).toLocaleTimeString()+": обидва режими в мінусі</b>":"")+"<br>"+(XP.autoCoins?'<span style="color:#67e8f9">Монети: топ волатильності (оновлення кожні '+XP.pickEveryMin+" хв)"+((X.vol||[]).length?" — "+X.vol.slice(0,XP.coinCount).map(v=>esc(v.sym)+" "+v.rng1h+"%/год").join(", "):"")+"</span><br>":"")+"Угод "+(XS.n||0)+(XS.win!=null?" · win "+XS.win+"%":"")+" · PnL "+f(XS.pnl,4)+" · за добу "+(XS.day||0)+" угод "+f(XS.dayPnl,4)+(XS.avgHold!=null?" · середня угода "+XS.avgHold+" с":"")+" · монети: "+esc((XP.symbols||[]).join(", "));
+const LN=X.learn||{},OP=LN.opt;
+$("ssLearn").innerHTML='<b>🎯 Навчання на своїх угодах</b><br>'+"PF останніх 200: "+(LN.pf!=null?'<b class="'+(LN.pf>=1?"up":"down")+'">'+LN.pf+"</b>":"—")
++" · фільтр схожих угод: "+(LN.on?(LN.ready?'<span class="up">працює</span>, пропущено поганих сигналів '+LN.skipped:"навчається ("+LN.have+" з "+LN.need+" угод)"):"вимкнено")
++" · траєкторій для оптимізатора: "+(LN.paths||0)
++(OP&&OP.best?'<br>Оптимізатор ('+new Date(OP.at).toLocaleTimeString()+", "+OP.n+" угод): зараз тейк "+OP.cur.tp+"% / стоп "+OP.cur.sl+"% → на угоду "+OP.cur.avg+"%, win "+OP.cur.win+"%, PF "+OP.cur.pf+' · найкраще <b class="up">тейк '+OP.best.tp+"% / стоп "+OP.best.sl+"%"+(OP.best.adaptive?" (адаптивно)":"")+"</b> → "+OP.best.avg+"%, win "+OP.best.win+"%, PF "+OP.best.pf+(OP.applied?' · <span class="up">застосовано</span>':""):(OP?"<br>Оптимізатор: з "+OP.n+" угод прибуткової пари тейк/стоп ще не знайдено":"<br>Оптимізатор запуститься після 30 угод з траєкторіями (далі кожні 15 угод)"));
 $("ssLive").innerHTML=(X.live||[]).map(l=>{const sg=[l.iceBid?"айсберг↑":"",l.iceAsk?"айсберг↓":"",l.absBull?"поглин.↑":"",l.absBear?"поглин.↓":"",l.spoofBid?"спуф bid":"",l.spoofAsk?"спуф ask":""].filter(Boolean).join(" ");
 return "<tr><td><b>"+esc(l.sym)+'</b></td><td class="'+(l.imb>=0.5?"up":"down")+'">'+(l.imb??"—")+'</td><td class="'+(l.delta>=0?"up":"down")+'">'+(l.delta??"—")+"</td><td>"+(l.burst!=null?"×"+l.burst:"—")+"</td><td>"+(sg||'<span class="mute">—</span>')+'</td><td class="'+(l.long>=XP.scoreIn?"up":"")+'">'+(l.long??"—")+'</td><td class="'+(l.short>=XP.scoreIn?"down":"")+'">'+(l.short??"—")+"</td><td>"+(l.peak10!=null?l.peak10:"—")+'</td><td class="mute">'+esc(l.why||"")+"</td></tr>"}).join("")||'<tr><td colspan="9" class="mute">Чекаю дані стакану…</td></tr>';
 $("ssOpen").innerHTML=(X.open||[]).map(o=>"<tr><td><b>"+esc(o.sym)+'</b> <span class="'+(o.side==="Buy"?"up":"down")+'">'+(o.side==="Buy"?"лонг":"шорт")+"</span></td><td>"+(o.state==="entry"?"чекає виконання ліміту":"в угоді"+(o.rides?" · імпульс ×"+o.rides:""))+"</td><td>"+esc(o.entry)+"</td><td>"+esc(o.tp||"—")+"</td><td>"+esc(o.sl||"—")+"</td><td>"+o.sec+"</td></tr>").join("")||'<tr><td colspan="6" class="mute">Відкритих угод суперскальпінгу немає</td></tr>';
@@ -637,7 +652,8 @@ s2+='<line x1="10" x2="590" y1="'+mid+'" y2="'+mid+'" stroke="#2b3139"/>';
 s2+='<polyline fill="none" stroke="#c4b5fd" stroke-width="2" points="'+cums.map((c,i)=>(10+i*bw+bw/2).toFixed(1)+","+(mid-c/cm*65).toFixed(1)).join(" ")+'"/>'}
 else s2='<text x="12" y="75" fill="#848e9c" font-size="13">Перший результат з&#39;явиться після другого рішення AI</text>';
 $("decChart").innerHTML=s2;}
-$("ss").onclick=()=>act("ss",S&&S.ss&&!S.ss.params.on?"Увімкнути суперскальпінг за стаканом? Вхід і тейк лімітками, стоп на біржі, до "+S.ss.params.maxPositions+" угод одночасно, денний ліміт збитку "+S.ss.params.dailyLossPct+"%.":"");
+$("ssOpt").onclick=()=>act("ssopt","");
+$("ss").onclick=()=>act("ss",S&&S.ss&&!S.ss.params.on?"Увімкнути суперскальпінг за стаканом? Вхід і тейк лімітками, стоп на біржі, до "+S.ss.params.maxPositions+" угод одночасно"+(S.ss.params.dailyLossPct>0?", денний ліміт збитку "+S.ss.params.dailyLossPct+"%":", без денного ліміту")+".":"");
 $("opt").onclick=()=>act("optimize","Застосувати найприбутковіші налаштування за статистикою угод?");
 $("autoopt").onclick=()=>act("autoopt","");
 $("scalp").onclick=()=>act("scalp",S&&!S.scalp?"Увімкнути скальпінг? Тейк +0.5%, стоп −1% від входу. Діє на нові заявки.":"");
@@ -659,7 +675,7 @@ http.createServer(async (req, res) => {
   if (!authorised(req)) { res.writeHead(401, { "WWW-Authenticate": 'Basic realm="Proboy Autopilot"' }); return res.end("Потрібен пароль (UI_PASSWORD)"); }
   try {
     if (url.pathname === "/api/state") return json(200, state());
-    if (req.method === "POST" && /^\/api\/(start|stop|scalp|ai|optimize|autoopt|ss)$/.test(url.pathname)) {
+    if (req.method === "POST" && /^\/api\/(start|stop|scalp|ai|optimize|autoopt|ss|ssopt)$/.test(url.pathname)) {
       if (!PASSWORD) return json(200, { text: "Задайте UI_PASSWORD у Railway → Variables, щоб керувати ботом" });
       return json(200, { text: await act(url.pathname.split("/").pop()) });
     }
