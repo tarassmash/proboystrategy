@@ -475,7 +475,24 @@ function analyse(symbol, rows, last) {
 
 // ------------------------------------------------------------------ orders
 function linkId(symbol, side) { return ("bx" + symbol.slice(0, 12) + (side === "Buy" ? "B" : "S") + Date.now().toString(36)).slice(0, 36); }
+// breakouts switched off on the server (variable BREAKOUT is not "1"): no trigger orders, no breakout entries
+async function sweepBreakout() {
+  if (!window.__noBreakout) return 0;
+  let n = 0;
+  for (const s of [...SETUPS]) { try { await cancelAll(s); await cancelDip(s); } catch (e) { /* gone */ } SETUPS = SETUPS.filter(x => x !== s); n++; }
+  saveSetups();
+  for (const filter of ["StopOrder", "Order"]) {
+    try {
+      const r = await bx("/v5/order/realtime", { query: { category: "linear", settleCoin: "USDT", orderFilter: filter, limit: "50" }, auth: true });
+      for (const o of r.list || []) if (/^b[xn]/.test(String(o.orderLinkId || ""))) { try { await bx("/v5/order/cancel", { method: "POST", body: { category: "linear", symbol: o.symbol, orderLinkId: o.orderLinkId, orderFilter: filter }, auth: true }); n++; } catch (e) { /* gone */ } }
+    } catch (e) { /* no keys */ }
+  }
+  if (RUN) setRun(false);
+  if (CFG.autopilot) { CFG.autopilot = false; LS.set("settings", CFG); }
+  return n;
+}
 async function createOrder(body) {
+  if (window.__noBreakout && body.triggerPrice) throw new Error("пробої вимкнено на сервері (змінна BREAKOUT=1 вмикає)");
   try { return await bx("/v5/order/create", { method: "POST", body: { ...body, positionIdx: 0 }, auth: true }); }
   catch (e) {
     if (!/position idx/i.test(e.message)) throw e;
@@ -1010,6 +1027,7 @@ async function placeLimitAny(symbol, side, price, qty, linkId, reduceOnly, tif =
   }
 }
 async function enterNow(symbol, side, src = null, opts = {}) {
+  if (window.__noBreakout) throw new Error("пробої вимкнено на сервері (змінна BREAKOUT=1 вмикає)");
   if (!$("k-key").value.trim()) throw new BybitErr("Спочатку введіть API ключі вгорі сторінки");
   symbol = String(symbol || "").trim().toUpperCase();
   if (!/^[A-Z0-9]{2,30}USDT$/.test(symbol)) throw new BybitErr("Монета на кшталт SOLUSDT");
@@ -1350,6 +1368,7 @@ async function balanceSlots() {
   } catch (e) { return CFG.maxSetups; }
 }
 async function autopilotScan() {
+  if (window.__noBreakout) return;
   const fixedMax = CFG.maxSetups;
   if (CFG.maxMode !== "fixed") { AP.slots = await balanceSlots(); CFG.maxSetups = AP.slots; } else AP.slots = fixedMax;
   const base = Object.fromEntries(RELAX_KEYS.map(k => [k, CFG[k]]));

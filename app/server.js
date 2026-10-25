@@ -68,6 +68,8 @@ dom = new JSDOM(ENGINE, {
   virtualConsole: vc,
   beforeParse(window) {
     for (const [k, v] of Object.entries(saved)) { try { window.localStorage.setItem(k, v); } catch {} }
+    // breakout trigger orders are off unless BREAKOUT=1 (trading moved to STAKAN-TRADING; two bots on one account fight)
+    window.__noBreakout = (process.env.BREAKOUT || "").trim() !== "1";
     window.fetch = (input, init) => {
       if (typeof input === "string") {
         if (TEST_URL) input = input.replace(/^https:\/\/api(-testnet)?\.bybit\.com/, TEST_URL);
@@ -85,6 +87,11 @@ dom = new JSDOM(ENGINE, {
   },
 });
 const W = dom.window, D = W.document;
+// breakouts off: remove the old trigger orders now and keep the account clean
+if ((process.env.BREAKOUT || "").trim() !== "1") {
+  const sweep = async () => { try { const n = await W.eval("sweepBreakout()"); if (n) W.eval(`log(${JSON.stringify("🧹 Пробої вимкнено: знято тригерних ордерів/сетапів: ")} + ${Number(n) || 0}, "gold-t")`); } catch (e) { /* engine not ready */ } };
+  setTimeout(sweep, 8000); setInterval(sweep, 60000);
+}
 setInterval(dumpStorage, 5000);
 for (const sig of ["SIGTERM", "SIGINT"]) process.on(sig, () => { try { dumpStorage(); } catch {} process.exit(0); });
 process.on("unhandledRejection", (e) => log("unhandled:", e && (e.message || e)));
@@ -621,6 +628,7 @@ function state() {
 }
 
 async function act(what) {
+  if (what === "start" && (process.env.BREAKOUT || "").trim() !== "1") return "Пробої (тригерні ордери) вимкнено: торгівля тепер у STAKAN-TRADING. Щоб увімкнути тут — змінна BREAKOUT=1 у Railway.";
   if (what === "start") {
     if (ev("RUN") && ev("CFG.autopilot")) return "Вже працює";
     if (!ev("CFG.autopilot")) click("btn-auto"); else click("btn-start");
