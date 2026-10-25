@@ -69,6 +69,8 @@ dom = new JSDOM(PAGE, {
   virtualConsole: vc,
   beforeParse(window) {
     for (const [k, v] of Object.entries(saved)) { try { window.localStorage.setItem(k, v); } catch {} }
+    // breakout trigger orders are off unless BREAKOUT=1 (trading moved to STAKAN-TRADING; two bots on one account fight)
+    window.__noBreakout = (process.env.BREAKOUT || "").trim() !== "1";
     // TEST_BYBIT_URL: send the page's Bybit requests to a test server (used for automated checks only)
     const testUrl = (process.env.TEST_BYBIT_URL || "").trim();
     window.fetch = (input, init) => {
@@ -116,6 +118,11 @@ setInterval(checkBybit, 10 * 60000);
 
 // ---------------- snapshot of the live page ----------------
 const doc = () => dom.window.document;
+// breakouts off: remove the old trigger orders now and keep the account clean
+if ((process.env.BREAKOUT || "").trim() !== "1") {
+  const sweep = async () => { try { const n = await dom.window.eval("sweepBreakout()"); if (n) dom.window.eval(`log(${JSON.stringify("🧹 Пробої вимкнено: знято тригерних ордерів/сетапів: ")} + ${Number(n) || 0}, "gold-t")`); } catch (e) { /* engine not ready */ } };
+  setTimeout(sweep, 8000); setInterval(sweep, 60000);
+}
 function snapshot() {
   const body = doc().body.cloneNode(true);
   const live = doc().body.querySelectorAll("input, select, textarea");
